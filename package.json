@@ -1,7 +1,7 @@
 {
   "name": "nova-proxy",
   "version": "2.0.0",
-  "description": "Nova Telegram Bot Panel",
+  "description": "Nova Proxy Telegram Bot Panel",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "express-session": "^1.18.1",
-    "multer": "^2.0.2"
+    "express-session": "^1.18.1"
   }
 }
