@@ -1,0 +1,3249 @@
+const express = require("express");
+const session = require("express-session");
+const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
+
+const app = express();
+
+const PORT = process.env.PORT || 3000;
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "mmk1122";
+
+const DATA_DIR = path.join(__dirname, "data");
+const DATA_FILE = path.join(DATA_DIR, "data.json");
+
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function defaultDB() {
+  return {
+    users: [],
+    bots: [],
+    botUsers: {},
+    commands: {}
+  };
+}
+
+function loadDB() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) {
+      const db = defaultDB();
+      fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2));
+      return db;
+    }
+
+    const db = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
+
+    db.users = Array.isArray(db.users) ? db.users : [];
+    db.bots = Array.isArray(db.bots) ? db.bots : [];
+    db.botUsers = db.botUsers && typeof db.botUsers === "object"
+      ? db.botUsers
+      : {};
+    db.commands = db.commands && typeof db.commands === "object"
+      ? db.commands
+      : {};
+
+    for (const bot of db.bots) {
+      if (!Array.isArray(bot.forceJoins)) {
+        bot.forceJoins = bot.forceJoin ? [bot.forceJoin] : [];
+      }
+    }
+
+    return db;
+  } catch (err) {
+    console.error("خطا در خواندن data.json:", err);
+    return defaultDB();
+  }
+}
+
+let db = loadDB();
+
+function saveDB() {
+  fs.writeFileSync(
+    DATA_FILE,
+    JSON.stringify(db, null, 2)
+  );
+}
+
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || "nova-secret-2026",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      maxAge: 1000 * 60 * 60 * 24 * 30
+    }
+  })
+);
+
+function hashPassword(password) {
+  return crypto
+    .createHash("sha256")
+    .update(String(password))
+    .digest("hex");
+}
+
+function makeId(length = 12) {
+  return crypto.randomBytes(16)
+    .toString("hex")
+    .slice(0, length);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function getUser(req) {
+  if (!req.session.userId) return null;
+
+  return db.users.find(
+    x => x.id === req.session.userId
+  ) || null;
+}
+
+function requireLogin(req, res, next) {
+  if (!getUser(req)) {
+    return res.redirect("/login");
+  }
+
+  next();
+}
+
+function requireCreator(req, res, next) {
+  if (!req.session.creator) {
+    return res.redirect("/creator/login");
+  }
+
+  next();
+}
+
+function getUserBots(userId) {
+  return db.bots.filter(
+    bot => bot.ownerId === userId
+  );
+}
+
+function getBotForUser(req, botId) {
+  const user = getUser(req);
+
+  if (!user) return null;
+
+  return db.bots.find(
+    bot =>
+      bot.id === botId &&
+      bot.ownerId === user.id
+  ) || null;
+}
+
+function getCommands(botId) {
+  if (!Array.isArray(db.commands[botId])) {
+    db.commands[botId] = [];
+  }
+
+  return db.commands[botId];
+}
+
+function telegramUrl(token, method) {
+  return `https://api.telegram.org/bot${token}/${method}`;
+}
+
+async function telegram(token, method, body = {}) {
+  const response = await fetch(
+    telegramUrl(token, method),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }
+  );
+
+  const data = await response.json();
+
+  if (!data.ok) {
+    throw new Error(
+      data.description || "Telegram API Error"
+    );
+  }
+
+  return data.result;
+}
+
+async function sendTelegramMessage(
+  token,
+  chatId,
+  text
+) {
+  return telegram(
+    token,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text: String(text || "")
+    }
+  );
+}
+
+function parsePublicTelegramLink(input) {
+  let value = String(input || "").trim();
+
+  if (!value) return null;
+
+  if (!/^https?:\/\/t\.me\//i.test(value)) {
+    if (/^t\.me\//i.test(value)) {
+      value = "https://" + value;
+    } else {
+      return null;
+    }
+  }
+
+  try {
+    const url = new URL(value);
+
+    if (url.hostname.toLowerCase() !== "t.me") {
+      return null;
+    }
+
+    const parts = url.pathname
+      .split("/")
+      .filter(Boolean);
+
+    if (parts.length !== 1) {
+      return null;
+    }
+
+    const username = parts[0];
+
+    if (
+      username.startsWith("+") ||
+      username.toLowerCase() === "joinchat"
+    ) {
+      return null;
+    }
+
+    if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) {
+      return null;
+    }
+
+    return {
+      username: "@" + username,
+      link: "https://t.me/" + username
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function checkBotAdminInChat(
+  bot,
+  chatUsername
+) {
+  const me = await telegram(
+    bot.token,
+    "getMe"
+  );
+
+  const member = await telegram(
+    bot.token,
+    "getChatMember",
+    {
+      chat_id: chatUsername,
+      user_id: me.id
+    }
+  );
+
+  if (
+    member.status !== "administrator" &&
+    member.status !== "creator"
+  ) {
+    throw new Error(
+      "ربات در این کانال یا گروه ادمین نیست."
+    );
+  }
+
+  return {
+    me,
+    member
+  };
+}
+
+async function checkMembership(
+  bot,
+  chatUsername,
+  userId
+) {
+  try {
+    const member = await telegram(
+      bot.token,
+      "getChatMember",
+      {
+        chat_id: chatUsername,
+        user_id: userId
+      }
+    );
+
+    const status = member.status;
+
+    if (
+      status === "creator" ||
+      status === "administrator" ||
+      status === "member"
+    ) {
+      return true;
+    }
+
+    if (
+      status === "restricted" &&
+      member.is_member === true
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function checkAllMemberships(
+  bot,
+  userId
+) {
+  const joins = Array.isArray(bot.forceJoins)
+    ? bot.forceJoins
+    : [];
+
+  for (const join of joins) {
+    const ok = await checkMembership(
+      bot,
+      join.username,
+      userId
+    );
+
+    if (!ok) {
+      return {
+        ok: false,
+        missing: join
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    missing: null
+  };
+}
+
+async function sendJoinMessage(
+  bot,
+  chatId
+) {
+  const joins = Array.isArray(bot.forceJoins)
+    ? bot.forceJoins
+    : [];
+
+  const keyboard = [];
+
+  for (const join of joins) {
+    keyboard.push([
+      {
+        text: `📢 ${join.title || join.username}`,
+        url: join.link
+      }
+    ]);
+  }
+
+  keyboard.push([
+    {
+      text: "✅ بررسی عضویت",
+      callback_data: "check_join"
+    }
+  ]);
+
+  await telegram(
+    bot.token,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text:
+        "🔒 برای استفاده از ربات ابتدا باید در موارد زیر عضو شوید:\n\n" +
+        "بعد از عضویت روی «✅ بررسی عضویت» بزنید.",
+      reply_markup: {
+        inline_keyboard: keyboard
+      }
+    }
+  );
+}
+
+async function executeCommand(
+  bot,
+  chatId,
+  text
+) {
+  const commands = getCommands(bot.id);
+
+  if (
+    !Array.isArray(commands) ||
+    commands.length === 0
+  ) {
+    return false;
+  }
+
+  const first = String(text || "")
+    .trim()
+    .split(/\s+/)[0]
+    .toLowerCase();
+
+  if (!first.startsWith("/")) {
+    return false;
+  }
+
+  const commandName = first
+    .split("@")[0]
+    .replace(/^\/+/, "")
+    .toLowerCase();
+
+  const command = commands.find(
+    x =>
+      String(x.name).toLowerCase() ===
+      commandName
+  );
+
+  if (!command) {
+    return false;
+  }
+
+  await sendTelegramMessage(
+    bot.token,
+    chatId,
+    command.reply
+  );
+
+  return true;
+}
+
+function saveTelegramUser(
+  bot,
+  message
+) {
+  if (!message.from) return;
+
+  const botId = bot.id;
+
+  if (!Array.isArray(db.botUsers[botId])) {
+    db.botUsers[botId] = [];
+  }
+
+  const list = db.botUsers[botId];
+
+  const exists = list.find(
+    x => x.id === message.from.id
+  );
+
+  if (exists) {
+    exists.username =
+      message.from.username || "";
+
+    exists.firstName =
+      message.from.first_name || "";
+
+    exists.lastName =
+      message.from.last_name || "";
+
+    exists.chatId =
+      message.chat.id;
+
+    exists.updatedAt =
+      new Date().toISOString();
+  } else {
+    list.push({
+      id: message.from.id,
+      chatId: message.chat.id,
+      username:
+        message.from.username || "",
+      firstName:
+        message.from.first_name || "",
+      lastName:
+        message.from.last_name || "",
+      createdAt:
+        new Date().toISOString()
+    });
+  }
+
+  saveDB();
+}
+
+async function handleCallback(
+  bot,
+  callback
+) {
+  if (
+    callback.data !== "check_join"
+  ) {
+    return;
+  }
+
+  const message = callback.message;
+
+  if (!message) return;
+
+  const chatId = message.chat.id;
+
+  const result =
+    await checkAllMemberships(
+      bot,
+      callback.from.id
+    );
+
+  if (result.ok) {
+    try {
+      await telegram(
+        bot.token,
+        "deleteMessage",
+        {
+          chat_id: chatId,
+          message_id: message.message_id
+        }
+      );
+    } catch {}
+
+    try {
+      await telegram(
+        bot.token,
+        "answerCallbackQuery",
+        {
+          callback_query_id:
+            callback.id,
+          text: "✅ عضویت شما تأیید شد."
+        }
+      );
+    } catch {}
+
+    return;
+  }
+
+  try {
+    await telegram(
+      bot.token,
+      "answerCallbackQuery",
+      {
+        callback_query_id:
+          callback.id,
+        text:
+          "❌ هنوز در همه موارد عضو نشده‌اید."
+      }
+    );
+  } catch {}
+}
+
+async function handleUpdate(
+  bot,
+  update
+) {
+  if (update.callback_query) {
+    await handleCallback(
+      bot,
+      update.callback_query
+    );
+
+    return;
+  }
+
+  if (!update.message) {
+    return;
+  }
+
+  const message = update.message;
+  const chatId = message.chat.id;
+
+  saveTelegramUser(
+    bot,
+    message
+  );
+
+  if (
+    Array.isArray(bot.forceJoins) &&
+    bot.forceJoins.length > 0 &&
+    message.from
+  ) {
+    const joined =
+      await checkAllMemberships(
+        bot,
+        message.from.id
+      );
+
+    if (!joined.ok) {
+      await sendJoinMessage(
+        bot,
+        chatId
+      );
+
+      return;
+    }
+  }
+
+  if (!message.text) {
+    return;
+  }
+
+  const handled =
+    await executeCommand(
+      bot,
+      chatId,
+      message.text
+    );
+
+  if (handled) {
+    return;
+  }
+
+  return;
+}
+
+const pollingTimers = new Map();
+
+async function pollBot(bot) {
+  if (!bot.token) return;
+
+  try {
+    const updates =
+      await telegram(
+        bot.token,
+        "getUpdates",
+        {
+          offset:
+            Number(bot.offset || 0),
+          timeout: 25,
+          allowed_updates: [
+            "message",
+            "callback_query"
+          ]
+        }
+      );
+
+    for (const update of updates) {
+      bot.offset =
+        Number(update.update_id) + 1;
+
+      try {
+        await handleUpdate(
+          bot,
+          update
+        );
+      } catch (err) {
+        console.error(
+          `Bot ${bot.username} update error:`,
+          err.message
+        );
+      }
+    }
+
+    saveDB();
+  } catch (err) {
+    console.error(
+      `Polling error for @${bot.username}:`,
+      err.message
+    );
+  }
+
+  if (db.bots.some(x => x.id === bot.id)) {
+    pollingTimers.set(
+      bot.id,
+      setTimeout(
+        () => pollBot(bot),
+        1000
+      )
+    );
+  }
+}
+
+function startBotPolling(bot) {
+  if (
+    pollingTimers.has(bot.id)
+  ) {
+    return;
+  }
+
+  pollBot(bot);
+}
+
+function stopBotPolling(botId) {
+  const timer =
+    pollingTimers.get(botId);
+
+  if (timer) {
+    clearTimeout(timer);
+    pollingTimers.delete(botId);
+  }
+}
+
+async function startAllBots() {
+  for (const bot of db.bots) {
+    startBotPolling(bot);
+  }
+}
+
+function layout(
+  title,
+  content,
+  req
+) {
+  const user = getUser(req);
+
+  const creator =
+    Boolean(req.session.creator);
+
+  return `
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+content="width=device-width, initial-scale=1.0">
+
+<title>${escapeHtml(title)}</title>
+
+<style>
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Tahoma, Arial, sans-serif;
+  color: #fff;
+  min-height: 100vh;
+  background:
+    radial-gradient(
+      circle at top right,
+      #283b9b 0,
+      transparent 35%
+    ),
+    radial-gradient(
+      circle at bottom left,
+      #54257e 0,
+      transparent 35%
+    ),
+    linear-gradient(
+      135deg,
+      #07111f,
+      #111936,
+      #080d1c
+    );
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+textarea {
+  font-family: inherit;
+}
+
+.container {
+  width: min(1180px, 94%);
+  margin: auto;
+}
+
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(18px);
+  background: rgba(6, 13, 28, .78);
+  border-bottom: 1px solid rgba(255,255,255,.08);
+}
+
+.nav-inner {
+  min-height: 70px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logo {
+  font-size: 20px;
+  font-weight: bold;
+}
+
+.menu-button {
+  border: 0;
+  background: rgba(255,255,255,.08);
+  color: #fff;
+  padding: 10px 14px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-size: 22px;
+}
+
+.sidebar {
+  position: fixed;
+  top: 0;
+  right: -310px;
+  width: 290px;
+  height: 100vh;
+  z-index: 50;
+  background: rgba(7,13,29,.97);
+  backdrop-filter: blur(20px);
+  border-left: 1px solid rgba(255,255,255,.08);
+  padding: 80px 18px 20px;
+  transition: .25s;
+  overflow-y: auto;
+}
+
+.sidebar.open {
+  right: 0;
+}
+
+.sidebar a {
+  display: block;
+  padding: 14px;
+  border-radius: 12px;
+  margin-bottom: 8px;
+  color: #dbe7ff;
+}
+
+.sidebar a:hover {
+  background: rgba(0,200,255,.12);
+}
+
+.close-menu {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font-size: 25px;
+  cursor: pointer;
+}
+
+main {
+  padding: 35px 0 60px;
+}
+
+.card {
+  background: rgba(255,255,255,.065);
+  border: 1px solid rgba(255,255,255,.09);
+  box-shadow: 0 20px 60px rgba(0,0,0,.22);
+  backdrop-filter: blur(18px);
+  border-radius: 22px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+
+.hero {
+  padding: 35px;
+}
+
+h1 {
+  margin-top: 0;
+}
+
+h2 {
+  margin-top: 0;
+}
+
+.muted {
+  color: #aebbd5;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns:
+    repeat(auto-fit, minmax(220px, 1fr));
+  gap: 18px;
+}
+
+.stat {
+  text-align: center;
+}
+
+.stat-number {
+  font-size: 35px;
+  font-weight: bold;
+  color: #5ee7ff;
+}
+
+.btn {
+  display: inline-block;
+  border: 0;
+  cursor: pointer;
+  padding: 12px 17px;
+  border-radius: 12px;
+  background: linear-gradient(
+    135deg,
+    #00c6ff,
+    #6c4cff
+  );
+  color: #fff;
+  font-weight: bold;
+  margin: 4px;
+}
+
+.btn.green {
+  background: linear-gradient(
+    135deg,
+    #00b894,
+    #00cec9
+  );
+}
+
+.btn.red {
+  background: linear-gradient(
+    135deg,
+    #ff4757,
+    #c0392b
+  );
+}
+
+.btn.orange {
+  background: linear-gradient(
+    135deg,
+    #ff9f43,
+    #e67e22
+  );
+}
+
+.btn.gray {
+  background: rgba(255,255,255,.10);
+}
+
+input,
+textarea {
+  width: 100%;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(0,0,0,.22);
+  color: #fff;
+  padding: 13px;
+  border-radius: 12px;
+  outline: none;
+  margin-top: 7px;
+  margin-bottom: 15px;
+}
+
+textarea {
+  min-height: 150px;
+  resize: vertical;
+}
+
+label {
+  display: block;
+  margin-bottom: 4px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 12px;
+  border-bottom:
+    1px solid rgba(255,255,255,.08);
+  text-align: right;
+}
+
+.alert {
+  padding: 14px;
+  border-radius: 13px;
+  margin-bottom: 18px;
+  background: rgba(255,255,255,.08);
+}
+
+.alert.error {
+  background: rgba(255,71,87,.15);
+  border: 1px solid rgba(255,71,87,.3);
+}
+
+.alert.success {
+  background: rgba(0,184,148,.15);
+  border: 1px solid rgba(0,184,148,.3);
+}
+
+.bot-card {
+  position: relative;
+}
+
+.badge {
+  display: inline-block;
+  background: rgba(0,198,255,.13);
+  color: #64eaff;
+  padding: 6px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+}
+
+form {
+  margin: 0;
+}
+
+@media(max-width: 650px) {
+
+  .hero {
+    padding: 24px;
+  }
+
+  .card {
+    padding: 18px;
+    border-radius: 18px;
+  }
+
+  th,
+  td {
+    font-size: 12px;
+    padding: 8px 5px;
+  }
+
+  .logo {
+    font-size: 16px;
+  }
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="navbar">
+  <div class="container nav-inner">
+
+    <div class="logo">
+      ربات ساز کانفیگ ساز رایگان
+    </div>
+
+    <button
+      class="menu-button"
+      onclick="openMenu()"
+    >
+      ☰
+    </button>
+
+  </div>
+</div>
+
+<div
+  id="sidebar"
+  class="sidebar"
+>
+
+<button
+  class="close-menu"
+  onclick="closeMenu()"
+>
+×
+</button>
+
+${
+  creator
+    ? `
+      <a href="/creator">
+        👑 پنل سازنده
+      </a>
+
+      <a href="/creator/broadcast">
+        📢 ارسال پیام به همه کاربران
+      </a>
+
+      <a href="/creator/logout">
+        🚪 خروج سازنده
+      </a>
+    `
+    : user
+      ? `
+        <a href="/">
+          🏠 داشبورد
+        </a>
+
+        <a href="/bots">
+          🤖 ربات‌های من
+        </a>
+
+        <a href="/bots/add">
+          ➕ افزودن ربات
+        </a>
+
+        <a href="/commands/add">
+          📝 افزودن دستور
+        </a>
+
+        <a href="/commands">
+          📋 مدیریت دستورها
+        </a>
+
+        <a href="/users">
+          👥 کاربران
+        </a>
+
+        <a href="/broadcast">
+          📢 ارسال پیام به همه کاربران
+        </a>
+
+        <a href="/forcejoin">
+          🔒 عضویت اجباری
+        </a>
+
+        <a href="/account">
+          👤 حساب کاربری
+        </a>
+
+        <a href="/logout">
+          🚪 خروج
+        </a>
+      `
+      : `
+        <a href="/login">
+          🔐 ورود
+        </a>
+
+        <a href="/register">
+          📝 ثبت‌نام
+        </a>
+
+        <a href="/creator/login">
+          👑 ورود سازنده
+        </a>
+      `
+}
+
+</div>
+
+<main>
+<div class="container">
+
+${content}
+
+</div>
+</main>
+
+<script>
+
+function openMenu() {
+  document
+    .getElementById("sidebar")
+    .classList.add("open");
+}
+
+function closeMenu() {
+  document
+    .getElementById("sidebar")
+    .classList.remove("open");
+}
+
+</script>
+
+</body>
+</html>
+`;
+}
+
+function messagePage(
+  title,
+  message,
+  req,
+  type = ""
+) {
+  return layout(
+    title,
+    `
+    <div class="card">
+      <div class="alert ${type}">
+        ${escapeHtml(message)}
+      </div>
+
+      <a
+        class="btn"
+        href="/"
+      >
+        🏠 بازگشت
+      </a>
+    </div>
+    `,
+    req
+  );
+}
+
+app.get("/", (req, res) => {
+  const user = getUser(req);
+
+  if (!user) {
+    return res.send(
+      layout(
+        "ربات ساز",
+        `
+        <div class="card hero">
+
+          <h1>
+            🤖 ربات ساز کانفیگ ساز رایگان
+          </h1>
+
+          <p class="muted">
+            ربات تلگرام خودت را به‌سادگی مدیریت کن.
+          </p>
+
+          <a
+            class="btn"
+            href="/login"
+          >
+            🔐 ورود
+          </a>
+
+          <a
+            class="btn green"
+            href="/register"
+          >
+            📝 ثبت‌نام
+          </a>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+
+  const bots =
+    getUserBots(user.id);
+
+  return res.send(
+    layout(
+      "داشبورد",
+      `
+      <div class="card hero">
+
+        <h1>
+          سلام ${escapeHtml(user.username)} 👋
+        </h1>
+
+        <p class="muted">
+          به پنل مدیریت ربات‌های خودت خوش آمدی.
+        </p>
+
+      </div>
+
+      <div class="grid">
+
+        <div class="card stat">
+          <div>
+            👥 کاربران
+          </div>
+
+          <div class="stat-number">
+            ${db.users.length}
+          </div>
+        </div>
+
+        <div class="card stat">
+          <div>
+            🤖 ربات‌های من
+          </div>
+
+          <div class="stat-number">
+            ${bots.length}
+          </div>
+        </div>
+
+      </div>
+
+      <div class="card">
+
+        <a
+          class="btn"
+          href="/bots/add"
+        >
+          ➕ افزودن ربات
+        </a>
+
+      </div>
+      `,
+      req
+    )
+  );
+});
+
+app.get("/register", (req, res) => {
+  res.send(
+    layout(
+      "ثبت‌نام",
+      `
+      <div class="card">
+
+        <h1>
+          📝 ثبت‌نام
+        </h1>
+
+        <form
+          method="POST"
+          action="/register"
+        >
+
+          <label>
+            نام کاربری
+          </label>
+
+          <input
+            name="username"
+            required
+            minlength="3"
+          >
+
+          <label>
+            رمز عبور
+          </label>
+
+          <input
+            type="password"
+            name="password"
+            required
+            minlength="4"
+          >
+
+          <button class="btn green">
+            ثبت‌نام
+          </button>
+
+        </form>
+
+        <a
+          class="btn gray"
+          href="/login"
+        >
+          ورود
+        </a>
+
+      </div>
+      `,
+      req
+    )
+  );
+});
+
+app.post("/register", (req, res) => {
+  const username =
+    String(req.body.username || "")
+      .trim();
+
+  const password =
+    String(req.body.password || "");
+
+  if (
+    username.length < 3 ||
+    password.length < 4
+  ) {
+    return res.send(
+      messagePage(
+        "خطا",
+        "نام کاربری یا رمز عبور معتبر نیست.",
+        req,
+        "error"
+      )
+    );
+  }
+
+  const exists =
+    db.users.some(
+      x =>
+        x.username.toLowerCase() ===
+        username.toLowerCase()
+    );
+
+  if (exists) {
+    return res.send(
+      messagePage(
+        "خطا",
+        "این نام کاربری قبلاً ثبت شده است.",
+        req,
+        "error"
+      )
+    );
+  }
+
+  const user = {
+    id: makeId(),
+    username,
+    passwordHash:
+      hashPassword(password),
+    createdAt:
+      new Date().toISOString()
+  };
+
+  db.users.push(user);
+  saveDB();
+
+  req.session.userId =
+    user.id;
+
+  res.redirect("/");
+});
+
+app.get("/login", (req, res) => {
+  res.send(
+    layout(
+      "ورود",
+      `
+      <div class="card">
+
+        <h1>
+          🔐 ورود
+        </h1>
+
+        <form
+          method="POST"
+          action="/login"
+        >
+
+          <label>
+            نام کاربری
+          </label>
+
+          <input
+            name="username"
+            required
+          >
+
+          <label>
+            رمز عبور
+          </label>
+
+          <input
+            type="password"
+            name="password"
+            required
+          >
+
+          <button class="btn">
+            ورود
+          </button>
+
+        </form>
+
+        <a
+          class="btn green"
+          href="/register"
+        >
+          ثبت‌نام
+        </a>
+
+      </div>
+      `,
+      req
+    )
+  );
+});
+
+app.post("/login", (req, res) => {
+  const username =
+    String(req.body.username || "")
+      .trim();
+
+  const password =
+    String(req.body.password || "");
+
+  const user =
+    db.users.find(
+      x =>
+        x.username.toLowerCase() ===
+        username.toLowerCase()
+    );
+
+  if (
+    !user ||
+    user.passwordHash !==
+      hashPassword(password)
+  ) {
+    return res.send(
+      messagePage(
+        "خطا",
+        "نام کاربری یا رمز عبور اشتباه است.",
+        req,
+        "error"
+      )
+    );
+  }
+
+  req.session.userId =
+    user.id;
+
+  res.redirect("/");
+});
+
+app.get("/logout", (req, res) => {
+  req.session.destroy(() => {
+    res.redirect("/login");
+  });
+});
+
+app.get(
+  "/bots",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bots =
+      getUserBots(user.id);
+
+    const html = `
+      <div class="card">
+        <h1>🤖 ربات‌های من</h1>
+
+        <a
+          class="btn green"
+          href="/bots/add"
+        >
+          ➕ افزودن ربات
+        </a>
+      </div>
+
+      <div class="grid">
+
+        ${
+          bots.length
+            ? bots.map(bot => `
+              <div class="card bot-card">
+
+                <span class="badge">
+                  فعال
+                </span>
+
+                <h2>
+                  ${escapeHtml(bot.name)}
+                </h2>
+
+                <p class="muted">
+                  @${escapeHtml(bot.username)}
+                </p>
+
+                <p>
+                  👥 ${
+                    Array.isArray(
+                      db.botUsers[bot.id]
+                    )
+                      ? db.botUsers[bot.id].length
+                      : 0
+                  } کاربر
+                </p>
+
+                <a
+                  class="btn"
+                  href="/bots/${bot.id}"
+                >
+                  ⚙️ مدیریت
+                </a>
+
+                <form
+                  method="POST"
+                  action="/bots/${bot.id}/delete"
+                  style="display:inline"
+                  onsubmit="return confirm('این ربات حذف شود؟')"
+                >
+                  <button class="btn red">
+                    🗑 حذف
+                  </button>
+                </form>
+
+              </div>
+            `).join("")
+            : `
+              <div class="card">
+                <p class="muted">
+                  هنوز رباتی اضافه نکرده‌اید.
+                </p>
+              </div>
+            `
+        }
+
+      </div>
+    `;
+
+    res.send(
+      layout(
+        "ربات‌های من",
+        html,
+        req
+      )
+    );
+  }
+);
+
+app.get(
+  "/bots/add",
+  requireLogin,
+  (req, res) => {
+    res.send(
+      layout(
+        "افزودن ربات",
+        `
+        <div class="card">
+
+          <h1>
+            ➕ افزودن ربات
+          </h1>
+
+          <p class="muted">
+            توکن ربات را از BotFather وارد کنید.
+          </p>
+
+          <form
+            method="POST"
+            action="/bots/add"
+          >
+
+            <label>
+              توکن ربات
+            </label>
+
+            <input
+              name="token"
+              placeholder="123456789:ABC..."
+              required
+            >
+
+            <button class="btn green">
+              ➕ افزودن ربات
+            </button>
+
+          </form>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.post(
+  "/bots/add",
+  requireLogin,
+  async (req, res) => {
+    const user =
+      getUser(req);
+
+    const token =
+      String(req.body.token || "")
+        .trim();
+
+    if (!token) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "توکن وارد نشده است.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    try {
+      const me =
+        await telegram(
+          token,
+          "getMe"
+        );
+
+      const already =
+        db.bots.some(
+          bot =>
+            bot.token === token
+        );
+
+      if (already) {
+        return res.send(
+          messagePage(
+            "خطا",
+            "این ربات قبلاً اضافه شده است.",
+            req,
+            "error"
+          )
+        );
+      }
+
+      const bot = {
+        id: makeId(),
+        ownerId: user.id,
+        token,
+        name:
+          me.first_name ||
+          me.username ||
+          "ربات",
+        username:
+          me.username || "",
+        telegramId:
+          me.id,
+        offset: 0,
+        createdAt:
+          new Date().toISOString(),
+        forceJoins: []
+      };
+
+      db.bots.push(bot);
+      db.botUsers[bot.id] = [];
+      db.commands[bot.id] = [];
+
+      saveDB();
+
+      startBotPolling(bot);
+
+      res.redirect(
+        `/bots/${bot.id}`
+      );
+    } catch (err) {
+      res.send(
+        messagePage(
+          "خطا",
+          "توکن ربات معتبر نیست یا ارتباط با تلگرام برقرار نشد: " +
+            err.message,
+          req,
+          "error"
+        )
+      );
+    }
+  }
+);
+
+app.get(
+  "/bots/:id",
+  requireLogin,
+  (req, res) => {
+    const bot =
+      getBotForUser(
+        req,
+        req.params.id
+      );
+
+    if (!bot) {
+      return res.status(404).send(
+        messagePage(
+          "خطا",
+          "ربات پیدا نشد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const users =
+      Array.isArray(
+        db.botUsers[bot.id]
+      )
+        ? db.botUsers[bot.id]
+        : [];
+
+    const commands =
+      getCommands(bot.id);
+
+    res.send(
+      layout(
+        "مدیریت ربات",
+        `
+        <div class="card">
+
+          <h1>
+            🤖 ${escapeHtml(bot.name)}
+          </h1>
+
+          <p class="muted">
+            @${escapeHtml(bot.username)}
+          </p>
+
+          <div class="grid">
+
+            <div class="card stat">
+              👥 کاربران
+              <div class="stat-number">
+                ${users.length}
+              </div>
+            </div>
+
+            <div class="card stat">
+              📝 دستورات
+              <div class="stat-number">
+                ${commands.length}
+              </div>
+            </div>
+
+            <div class="card stat">
+              🔒 عضویت اجباری
+              <div class="stat-number">
+                ${
+                  Array.isArray(
+                    bot.forceJoins
+                  )
+                    ? bot.forceJoins.length
+                    : 0
+                }
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+
+        <div class="card">
+
+          <h2>
+            مدیریت
+          </h2>
+
+          <a
+            class="btn"
+            href="/commands?bot=${bot.id}"
+          >
+            📝 دستورات
+          </a>
+
+          <a
+            class="btn orange"
+            href="/forcejoin?bot=${bot.id}"
+          >
+            🔒 عضویت اجباری
+          </a>
+
+          <a
+            class="btn green"
+            href="/broadcast?bot=${bot.id}"
+          >
+            📢 ارسال پیام
+          </a>
+
+          <a
+            class="btn gray"
+            href="/users?bot=${bot.id}"
+          >
+            👥 کاربران
+          </a>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.post(
+  "/bots/:id/delete",
+  requireLogin,
+  (req, res) => {
+    const bot =
+      getBotForUser(
+        req,
+        req.params.id
+      );
+
+    if (!bot) {
+      return res.status(404).send(
+        messagePage(
+          "خطا",
+          "ربات پیدا نشد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    stopBotPolling(bot.id);
+
+    db.bots =
+      db.bots.filter(
+        x => x.id !== bot.id
+      );
+
+    delete db.botUsers[bot.id];
+    delete db.commands[bot.id];
+
+    saveDB();
+
+    res.redirect("/bots");
+  }
+);
+
+app.get(
+  "/commands",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const botId =
+      String(req.query.bot || "");
+
+    const bots =
+      getUserBots(user.id);
+
+    let selectedBot =
+      bots.find(
+        x => x.id === botId
+      );
+
+    if (!selectedBot) {
+      selectedBot = bots[0];
+    }
+
+    if (!selectedBot) {
+      return res.send(
+        layout(
+          "دستورات",
+          `
+          <div class="card">
+            هنوز رباتی اضافه نکرده‌اید.
+          </div>
+          `,
+          req
+        )
+      );
+    }
+
+    const commands =
+      getCommands(
+        selectedBot.id
+      );
+
+    res.send(
+      layout(
+        "مدیریت دستورها",
+        `
+        <div class="card">
+
+          <h1>
+            📋 مدیریت دستورها
+          </h1>
+
+          <p>
+            ربات:
+            <b>
+              @${escapeHtml(
+                selectedBot.username
+              )}
+            </b>
+          </p>
+
+          <a
+            class="btn green"
+            href="/commands/add?bot=${selectedBot.id}"
+          >
+            ➕ افزودن دستور
+          </a>
+
+        </div>
+
+        <div class="card">
+
+          ${
+            commands.length
+              ? commands.map(command => `
+                <div class="card">
+
+                  <h3>
+                    /${escapeHtml(command.name)}
+                  </h3>
+
+                  <p class="muted">
+                    ${escapeHtml(command.reply)}
+                  </p>
+
+                  <form
+                    method="POST"
+                    action="/commands/${command.id}/delete"
+                    onsubmit="return confirm('این دستور حذف شود؟')"
+                  >
+                    <input
+                      type="hidden"
+                      name="botId"
+                      value="${selectedBot.id}"
+                    >
+
+                    <button class="btn red">
+                      🗑 حذف دستور
+                    </button>
+                  </form>
+
+                </div>
+              `).join("")
+              : `
+                <p class="muted">
+                  هنوز دستوری ثبت نشده است.
+                </p>
+              `
+          }
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.get(
+  "/commands/add",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bots =
+      getUserBots(user.id);
+
+    const selected =
+      bots.find(
+        x => x.id === req.query.bot
+      ) || bots[0];
+
+    if (!selected) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "ابتدا یک ربات اضافه کنید.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    res.send(
+      layout(
+        "افزودن دستور",
+        `
+        <div class="card">
+
+          <h1>
+            📝 افزودن دستور
+          </h1>
+
+          <form
+            method="POST"
+            action="/commands/add"
+          >
+
+            <input
+              type="hidden"
+              name="botId"
+              value="${selected.id}"
+            >
+
+            <label>
+              نام دستور
+            </label>
+
+            <input
+              name="name"
+              placeholder="start"
+              required
+            >
+
+            <label>
+              پاسخ ربات
+            </label>
+
+            <textarea
+              name="reply"
+              placeholder="متن پاسخ..."
+              required
+            ></textarea>
+
+            <button class="btn green">
+              💾 ذخیره دستور
+            </button>
+
+          </form>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.post(
+  "/commands/add",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bot =
+      db.bots.find(
+        x =>
+          x.id === req.body.botId &&
+          x.ownerId === user.id
+      );
+
+    if (!bot) {
+      return res.status(404).send(
+        messagePage(
+          "خطا",
+          "ربات پیدا نشد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    let name =
+      String(req.body.name || "")
+        .trim()
+        .replace(/^\/+/, "")
+        .toLowerCase();
+
+    const reply =
+      String(req.body.reply || "")
+        .trim();
+
+    if (
+      !name ||
+      !/^[a-zA-Z0-9_]{1,32}$/.test(name)
+    ) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "نام دستور معتبر نیست.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    if (!reply) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "متن پاسخ خالی است.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const commands =
+      getCommands(bot.id);
+
+    const exists =
+      commands.some(
+        x =>
+          String(x.name).toLowerCase() ===
+          name
+      );
+
+    if (exists) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "این دستور قبلاً وجود دارد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    commands.push({
+      id: makeId(),
+      name,
+      reply,
+      createdAt:
+        new Date().toISOString()
+    });
+
+    saveDB();
+
+    res.redirect(
+      `/commands?bot=${bot.id}`
+    );
+  }
+);
+
+app.post(
+  "/commands/:id/delete",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bot =
+      db.bots.find(
+        x =>
+          x.id === req.body.botId &&
+          x.ownerId === user.id
+      );
+
+    if (!bot) {
+      return res.status(404).send(
+        messagePage(
+          "خطا",
+          "ربات پیدا نشد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const commands =
+      getCommands(bot.id);
+
+    db.commands[bot.id] =
+      commands.filter(
+        x =>
+          x.id !== req.params.id
+      );
+
+    saveDB();
+
+    res.redirect(
+      `/commands?bot=${bot.id}`
+    );
+  }
+);
+
+app.get(
+  "/forcejoin",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bots =
+      getUserBots(user.id);
+
+    const bot =
+      bots.find(
+        x => x.id === req.query.bot
+      ) || bots[0];
+
+    if (!bot) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "ابتدا یک ربات اضافه کنید.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const joins =
+      Array.isArray(bot.forceJoins)
+        ? bot.forceJoins
+        : [];
+
+    res.send(
+      layout(
+        "عضویت اجباری",
+        `
+        <div class="card">
+
+          <h1>
+            🔒 عضویت اجباری
+          </h1>
+
+          <p class="muted">
+            ربات:
+            @${escapeHtml(bot.username)}
+          </p>
+
+          <div class="alert">
+            ⚠️ توجه: ربات باید در کانال یا گروه موردنظر ادمین باشد؛ در غیر این صورت بررسی عضویت کاربران ممکن است کار نکند.
+          </div>
+
+          <p>
+            حداکثر ۵ کانال یا گروه می‌توانید اضافه کنید.
+          </p>
+
+          <form
+            method="POST"
+            action="/forcejoin/add"
+          >
+
+            <input
+              type="hidden"
+              name="botId"
+              value="${bot.id}"
+            >
+
+            <label>
+              لینک عمومی کانال یا گروه
+            </label>
+
+            <input
+              name="link"
+              placeholder="https://t.me/example"
+              required
+            >
+
+            <button
+              class="btn orange"
+            >
+              ➕ افزودن
+            </button>
+
+          </form>
+
+        </div>
+
+        <div class="card">
+
+          <h2>
+            موارد فعال
+          </h2>
+
+          ${
+            joins.length
+              ? joins.map((join, index) => `
+                <div class="card">
+
+                  <b>
+                    ${escapeHtml(
+                      join.title ||
+                      join.username
+                    )}
+                  </b>
+
+                  <p class="muted">
+                    ${escapeHtml(
+                      join.username
+                    )}
+                  </p>
+
+                  <a
+                    class="btn gray"
+                    href="${escapeHtml(join.link)}"
+                    target="_blank"
+                  >
+                    🔗 مشاهده
+                  </a>
+
+                  <form
+                    method="POST"
+                    action="/forcejoin/delete"
+                    style="display:inline"
+                    onsubmit="return confirm('این مورد حذف شود؟')"
+                  >
+
+                    <input
+                      type="hidden"
+                      name="botId"
+                      value="${bot.id}"
+                    >
+
+                    <input
+                      type="hidden"
+                      name="index"
+                      value="${index}"
+                    >
+
+                    <button class="btn red">
+                      🗑 حذف
+                    </button>
+
+                  </form>
+
+                </div>
+              `).join("")
+              : `
+                <p class="muted">
+                  هنوز عضویت اجباری ثبت نشده است.
+                </p>
+              `
+          }
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.post(
+  "/forcejoin/add",
+  requireLogin,
+  async (req, res) => {
+    const user =
+      getUser(req);
+
+    const bot =
+      db.bots.find(
+        x =>
+          x.id === req.body.botId &&
+          x.ownerId === user.id
+      );
+
+    if (!bot) {
+      return res.status(404).send(
+        messagePage(
+          "خطا",
+          "ربات پیدا نشد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    if (
+      !Array.isArray(bot.forceJoins)
+    ) {
+      bot.forceJoins = [];
+    }
+
+    if (
+      bot.forceJoins.length >= 5
+    ) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "حداکثر ۵ کانال یا گروه قابل ثبت است.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const parsed =
+      parsePublicTelegramLink(
+        req.body.link
+      );
+
+    if (!parsed) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "لینک عمومی تلگرام معتبر نیست.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const duplicate =
+      bot.forceJoins.some(
+        x =>
+          x.username.toLowerCase() ===
+          parsed.username.toLowerCase()
+      );
+
+    if (duplicate) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "این کانال یا گروه قبلاً اضافه شده است.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    try {
+      const chat =
+        await telegram(
+          bot.token,
+          "getChat",
+          {
+            chat_id:
+              parsed.username
+          }
+        );
+
+      if (
+        ![
+          "channel",
+          "supergroup",
+          "group"
+        ].includes(chat.type)
+      ) {
+        throw new Error(
+          "این لینک مربوط به کانال یا گروه نیست."
+        );
+      }
+
+      await checkBotAdminInChat(
+        bot,
+        parsed.username
+      );
+
+      bot.forceJoins.push({
+        username:
+          parsed.username,
+        link:
+          parsed.link,
+        title:
+          chat.title ||
+          parsed.username,
+        type:
+          chat.type
+      });
+
+      saveDB();
+
+      res.redirect(
+        `/forcejoin?bot=${bot.id}`
+      );
+    } catch (err) {
+      res.send(
+        messagePage(
+          "خطا",
+          err.message,
+          req,
+          "error"
+        )
+      );
+    }
+  }
+);
+
+app.post(
+  "/forcejoin/delete",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bot =
+      db.bots.find(
+        x =>
+          x.id === req.body.botId &&
+          x.ownerId === user.id
+      );
+
+    if (!bot) {
+      return res.status(404).send(
+        messagePage(
+          "خطا",
+          "ربات پیدا نشد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const index =
+      Number(req.body.index);
+
+    if (
+      !Array.isArray(bot.forceJoins) ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= bot.forceJoins.length
+    ) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "مورد موردنظر پیدا نشد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    bot.forceJoins.splice(
+      index,
+      1
+    );
+
+    saveDB();
+
+    res.redirect(
+      `/forcejoin?bot=${bot.id}`
+    );
+  }
+);
+
+app.get(
+  "/users",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bots =
+      getUserBots(user.id);
+
+    const bot =
+      bots.find(
+        x => x.id === req.query.bot
+      ) || bots[0];
+
+    if (!bot) {
+      return res.send(
+        messagePage(
+          "کاربران",
+          "هنوز رباتی ندارید.",
+          req
+        )
+      );
+    }
+
+    const users =
+      Array.isArray(
+        db.botUsers[bot.id]
+      )
+        ? db.botUsers[bot.id]
+        : [];
+
+    res.send(
+      layout(
+        "کاربران",
+        `
+        <div class="card">
+
+          <h1>
+            👥 کاربران ربات
+          </h1>
+
+          <p>
+            @${escapeHtml(bot.username)}
+          </p>
+
+          <div class="stat-number">
+            ${users.length}
+          </div>
+
+        </div>
+
+        <div class="card">
+
+          ${
+            users.length
+              ? `
+                <table>
+
+                  <thead>
+                    <tr>
+                      <th>
+                        ID
+                      </th>
+
+                      <th>
+                        Username
+                      </th>
+
+                      <th>
+                        نام
+                      </th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+
+                  ${users.map(user => `
+                    <tr>
+                      <td>
+                        ${escapeHtml(user.id)}
+                      </td>
+
+                      <td>
+                        ${
+                          user.username
+                            ? "@" +
+                              escapeHtml(
+                                user.username
+                              )
+                            : "-"
+                        }
+                      </td>
+
+                      <td>
+                        ${escapeHtml(
+                          [
+                            user.firstName,
+                            user.lastName
+                          ]
+                            .filter(Boolean)
+                            .join(" ")
+                        )}
+                      </td>
+                    </tr>
+                  `).join("")}
+
+                  </tbody>
+
+                </table>
+              `
+              : `
+                <p class="muted">
+                  هنوز کاربری ثبت نشده است.
+                </p>
+              `
+          }
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.get(
+  "/broadcast",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bots =
+      getUserBots(user.id);
+
+    const bot =
+      bots.find(
+        x => x.id === req.query.bot
+      ) || bots[0];
+
+    if (!bot) {
+      return res.send(
+        messagePage(
+          "ارسال پیام",
+          "ابتدا یک ربات اضافه کنید.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    res.send(
+      layout(
+        "ارسال پیام",
+        `
+        <div class="card">
+
+          <h1>
+            📢 ارسال پیام
+          </h1>
+
+          <p>
+            ربات:
+            @${escapeHtml(bot.username)}
+          </p>
+
+          <p class="muted">
+            پیام برای کاربران همین ربات ارسال می‌شود.
+          </p>
+
+          <form
+            method="POST"
+            action="/broadcast"
+          >
+
+            <input
+              type="hidden"
+              name="botId"
+              value="${bot.id}"
+            >
+
+            <textarea
+              name="message"
+              required
+              placeholder="متن پیام..."
+            ></textarea>
+
+            <button class="btn">
+              📢 ارسال پیام
+            </button>
+
+          </form>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.post(
+  "/broadcast",
+  requireLogin,
+  async (req, res) => {
+    const user =
+      getUser(req);
+
+    const bot =
+      db.bots.find(
+        x =>
+          x.id === req.body.botId &&
+          x.ownerId === user.id
+      );
+
+    if (!bot) {
+      return res.status(404).send(
+        messagePage(
+          "خطا",
+          "ربات پیدا نشد.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const text =
+      String(req.body.message || "")
+        .trim();
+
+    if (!text) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "پیام خالی است.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    const users =
+      Array.isArray(
+        db.botUsers[bot.id]
+      )
+        ? db.botUsers[bot.id]
+        : [];
+
+    let sent = 0;
+
+    for (const telegramUser of users) {
+      try {
+        await sendTelegramMessage(
+          bot.token,
+          telegramUser.chatId,
+          text
+        );
+
+        sent++;
+      } catch {}
+    }
+
+    res.send(
+      messagePage(
+        "ارسال شد",
+        `پیام برای ${sent} کاربر ارسال شد.`,
+        req,
+        "success"
+      )
+    );
+  }
+);
+
+app.get(
+  "/commands/add",
+  requireLogin,
+  (req, res, next) => {
+    next();
+  }
+);
+
+app.get(
+  "/account",
+  requireLogin,
+  (req, res) => {
+    const user =
+      getUser(req);
+
+    const bots =
+      getUserBots(user.id);
+
+    res.send(
+      layout(
+        "حساب کاربری",
+        `
+        <div class="card">
+
+          <h1>
+            👤 حساب کاربری
+          </h1>
+
+          <p>
+            نام کاربری:
+            <b>
+              ${escapeHtml(user.username)}
+            </b>
+          </p>
+
+          <p>
+            تعداد ربات‌ها:
+            <b>
+              ${bots.length}
+            </b>
+          </p>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.get(
+  "/creator/login",
+  (req, res) => {
+    res.send(
+      layout(
+        "ورود سازنده",
+        `
+        <div class="card">
+
+          <h1>
+            👑 ورود سازنده
+          </h1>
+
+          <form
+            method="POST"
+            action="/creator/login"
+          >
+
+            <label>
+              رمز سازنده
+            </label>
+
+            <input
+              type="password"
+              name="password"
+              required
+            >
+
+            <button class="btn">
+              ورود
+            </button>
+
+          </form>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.post(
+  "/creator/login",
+  (req, res) => {
+    const password =
+      String(req.body.password || "");
+
+    if (
+      password !== ADMIN_PASSWORD
+    ) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "رمز سازنده اشتباه است.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    req.session.creator =
+      true;
+
+    res.redirect("/creator");
+  }
+);
+
+app.get(
+  "/creator",
+  requireCreator,
+  (req, res) => {
+    const totalUsers =
+      db.users.length;
+
+    const totalBots =
+      db.bots.length;
+
+    res.send(
+      layout(
+        "پنل سازنده",
+        `
+        <div class="card hero">
+
+          <h1>
+            👑 پنل سازنده
+          </h1>
+
+          <p class="muted">
+            مدیریت کاربران و ربات‌های سیستم
+          </p>
+
+        </div>
+
+        <div class="grid">
+
+          <div class="card stat">
+            👥 کاربران
+
+            <div class="stat-number">
+              ${totalUsers}
+            </div>
+          </div>
+
+          <div class="card stat">
+            🤖 ربات‌ها
+
+            <div class="stat-number">
+              ${totalBots}
+            </div>
+          </div>
+
+        </div>
+
+        <div class="card">
+
+          <h2>
+            🤖 تمام ربات‌ها
+          </h2>
+
+          ${
+            db.bots.length
+              ? `
+                <table>
+
+                  <thead>
+                    <tr>
+                      <th>
+                        ربات
+                      </th>
+
+                      <th>
+                        مالک
+                      </th>
+
+                      <th>
+                        Token
+                      </th>
+                    </tr>
+                  </thead>
+
+                  <tbody>
+
+                  ${db.bots.map(bot => {
+
+                    const owner =
+                      db.users.find(
+                        u =>
+                          u.id ===
+                          bot.ownerId
+                      );
+
+                    return `
+                      <tr>
+
+                        <td>
+                          @${escapeHtml(
+                            bot.username
+                          )}
+                        </td>
+
+                        <td>
+                          ${escapeHtml(
+                            owner
+                              ? owner.username
+                              : "-"
+                          )}
+                        </td>
+
+                        <td>
+                          <code>
+                            ${escapeHtml(
+                              bot.token
+                            )}
+                          </code>
+                        </td>
+
+                      </tr>
+                    `;
+                  }).join("")}
+
+                  </tbody>
+
+                </table>
+              `
+              : `
+                <p class="muted">
+                  هنوز رباتی ثبت نشده است.
+                </p>
+              `
+          }
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.get(
+  "/creator/broadcast",
+  requireCreator,
+  (req, res) => {
+    res.send(
+      layout(
+        "ارسال پیام همگانی",
+        `
+        <div class="card">
+
+          <h1>
+            📢 ارسال پیام به همه کاربران
+          </h1>
+
+          <p class="muted">
+            پیام برای کاربران تمام ربات‌های ثبت‌شده ارسال می‌شود.
+          </p>
+
+          <form
+            method="POST"
+            action="/creator/broadcast"
+          >
+
+            <textarea
+              name="message"
+              required
+              placeholder="متن پیام..."
+            ></textarea>
+
+            <button class="btn">
+              📢 ارسال به همه
+            </button>
+
+          </form>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.post(
+  "/creator/broadcast",
+  requireCreator,
+  async (req, res) => {
+    const text =
+      String(req.body.message || "")
+        .trim();
+
+    if (!text) {
+      return res.send(
+        messagePage(
+          "خطا",
+          "پیام خالی است.",
+          req,
+          "error"
+        )
+      );
+    }
+
+    let sent = 0;
+
+    const processed =
+      new Set();
+
+    for (const bot of db.bots) {
+      const users =
+        Array.isArray(
+          db.botUsers[bot.id]
+        )
+          ? db.botUsers[bot.id]
+          : [];
+
+      for (const telegramUser of users) {
+        const key =
+          `${bot.id}:${telegramUser.chatId}`;
+
+        if (processed.has(key)) {
+          continue;
+        }
+
+        processed.add(key);
+
+        try {
+          await sendTelegramMessage(
+            bot.token,
+            telegramUser.chatId,
+            text
+          );
+
+          sent++;
+        } catch {}
+      }
+    }
+
+    res.send(
+      messagePage(
+        "ارسال شد",
+        `پیام برای ${sent} کاربر ارسال شد.`,
+        req,
+        "success"
+      )
+    );
+  }
+);
+
+app.get(
+  "/creator/logout",
+  requireCreator,
+  (req, res) => {
+    req.session.creator = false;
+    res.redirect(
+      "/creator/login"
+    );
+  }
+);
+
+app.use(
+  (req, res) => {
+    res.status(404).send(
+      layout(
+        "404",
+        `
+        <div class="card">
+
+          <h1>
+            404
+          </h1>
+
+          <p>
+            صفحه موردنظر پیدا نشد.
+          </p>
+
+          <a
+            class="btn"
+            href="/"
+          >
+            🏠 خانه
+          </a>
+
+        </div>
+        `,
+        req
+      )
+    );
+  }
+);
+
+app.listen(
+  PORT,
+  () => {
+    console.log(
+      `Server running on port ${PORT}`
+    );
+
+    startAllBots();
+  }
+);
