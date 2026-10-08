@@ -1,298 +1,160 @@
 const express = require("express");
 const session = require("express-session");
-const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const app = express();
 
 const PORT = process.env.PORT || 3000;
+const DATA_DIR = path.join(__dirname, "data");
+const DATA_FILE = path.join(DATA_DIR, "data.json");
+
 const ADMIN_PASSWORD =
   process.env.ADMIN_PASSWORD || "mmkk1122";
 
-const SESSION_SECRET =
-  process.env.SESSION_SECRET ||
-  "nova-proxy-secret-2026";
-
-const DATA_DIR = path.join(__dirname, "data");
-const DATA_FILE = path.join(
-  DATA_DIR,
-  "data.json"
-);
-
 if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, {
-    recursive: true
-  });
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
+
+const DEFAULT_DB = {
+  users: [],
+  bots: [],
+  botUsers: {},
+  commands: {},
+  forceJoins: {},
+  forceJoinVerified: {},
+  activities: []
+};
+
+let db;
 
 function makeId() {
-  return crypto
-    .randomBytes(12)
-    .toString("hex");
+  return crypto.randomBytes(8).toString("hex");
 }
 
-function defaultDB() {
-  return {
-    users: [],
-    bots: [],
-    botUsers: {},
-    commands: {},
-    activity: []
-  };
+function saveDB() {
+  fs.writeFileSync(
+    DATA_FILE,
+    JSON.stringify(db, null, 2),
+    "utf8"
+  );
 }
 
-function normalizeDB(data) {
-  if (!data || typeof data !== "object") {
-    data = defaultDB();
-  }
-
-  if (!Array.isArray(data.users)) {
-    data.users = [];
-  }
-
-  if (!Array.isArray(data.bots)) {
-    data.bots = [];
-  }
-
-  if (
-    !data.botUsers ||
-    typeof data.botUsers !== "object"
-  ) {
-    data.botUsers = {};
-  }
-
-  if (
-    !data.commands ||
-    typeof data.commands !== "object"
-  ) {
-    data.commands = {};
-  }
-
-  if (!Array.isArray(data.activity)) {
-    data.activity = [];
-  }
-
-  for (const bot of data.bots) {
-    if (!bot.id) {
-      bot.id = makeId();
+function loadDB() {
+  try {
+    if (fs.existsSync(DATA_FILE)) {
+      db = JSON.parse(
+        fs.readFileSync(DATA_FILE, "utf8")
+      );
+    } else {
+      db = JSON.parse(
+        JSON.stringify(DEFAULT_DB)
+      );
     }
+  } catch {
+    db = JSON.parse(
+      JSON.stringify(DEFAULT_DB)
+    );
+  }
 
+  for (const key of Object.keys(DEFAULT_DB)) {
+    if (db[key] === undefined) {
+      db[key] =
+        JSON.parse(
+          JSON.stringify(DEFAULT_DB[key])
+        );
+    }
+  }
+
+  if (!Array.isArray(db.users))
+    db.users = [];
+
+  if (!Array.isArray(db.bots))
+    db.bots = [];
+
+  if (!db.botUsers)
+    db.botUsers = {};
+
+  if (!db.commands)
+    db.commands = {};
+
+  if (!db.forceJoins)
+    db.forceJoins = {};
+
+  if (!db.forceJoinVerified)
+    db.forceJoinVerified = {};
+
+  if (!Array.isArray(db.activities))
+    db.activities = [];
+
+  for (const bot of db.bots) {
     if (!Array.isArray(bot.forceJoins)) {
       bot.forceJoins = [];
     }
 
-    if (
-      !bot.forceJoinVerified ||
-      typeof bot.forceJoinVerified !== "object" ||
-      Array.isArray(bot.forceJoinVerified)
-    ) {
-      bot.forceJoinVerified = {};
-    }
+    if (!db.botUsers[bot.id])
+      db.botUsers[bot.id] = {};
+
+    if (!db.commands[bot.id])
+      db.commands[bot.id] = {};
+
+    if (!db.forceJoinVerified[bot.id])
+      db.forceJoinVerified[bot.id] = {};
 
     for (const join of bot.forceJoins) {
       if (!join.id) {
         join.id = makeId();
       }
     }
-
-    if (!data.botUsers[bot.id]) {
-      data.botUsers[bot.id] = {};
-    }
-
-    if (!data.commands[bot.id]) {
-      data.commands[bot.id] = {};
-    }
-  }
-
-  return data;
-}
-
-let db;
-
-try {
-  if (fs.existsSync(DATA_FILE)) {
-    db = normalizeDB(
-      JSON.parse(
-        fs.readFileSync(
-          DATA_FILE,
-          "utf8"
-        )
-      )
-    );
-  } else {
-    db = defaultDB();
-
-    fs.writeFileSync(
-      DATA_FILE,
-      JSON.stringify(
-        db,
-        null,
-        2
-      ),
-      "utf8"
-    );
-  }
-} catch (error) {
-  console.error(
-    "Database error:",
-    error
-  );
-
-  db = defaultDB();
-
-  fs.writeFileSync(
-    DATA_FILE,
-    JSON.stringify(
-      db,
-      null,
-      2
-    ),
-    "utf8"
-  );
-}
-
-function saveDB() {
-  fs.writeFileSync(
-    DATA_FILE,
-    JSON.stringify(
-      db,
-      null,
-      2
-    ),
-    "utf8"
-  );
-}
-
-function addActivity(
-  type,
-  text,
-  botId = null
-) {
-  db.activity.unshift({
-    id: makeId(),
-    type,
-    text,
-    botId,
-    createdAt: Date.now()
-  });
-
-  if (db.activity.length > 500) {
-    db.activity =
-      db.activity.slice(0, 500);
   }
 
   saveDB();
 }
 
-app.use(
-  express.urlencoded({
-    extended: true
-  })
-);
+loadDB();
 
-app.use(express.json());
-
-app.use(
-  session({
-    secret: SESSION_SECRET,
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      maxAge:
-        1000 *
-        60 *
-        60 *
-        24 *
-        30,
-      httpOnly: true
-    }
-  })
-);
-
-/* =========================
-   HELPERS
-========================= */
-
-function escapeHtml(value) {
+function esc(value) {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
-    .replace(
-      /</g,
-      "&lt;"
-    )
-    .replace(
-      />/g,
-      "&gt;"
-    )
-    .replace(
-      /"/g,
-      "&quot;"
-    )
-    .replace(
-      /'/g,
-      "&#039;"
-    );
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
-function hashPassword(password) {
-  return crypto
-    .createHash("sha256")
-    .update(String(password))
-    .digest("hex");
-}
-
-function requireLogin(
-  req,
-  res,
-  next
-) {
-  if (!req.session.userId) {
-    return res.redirect(
-      "/login"
-    );
-  }
-
-  next();
-}
-
-function requireCreator(
-  req,
-  res,
-  next
-) {
-  if (!req.session.creator) {
-    return res.redirect(
-      "/creator/login"
-    );
-  }
-
-  next();
-}
-
-function findBot(req) {
-  const id = String(
-    req.query.bot ||
-      req.params.id ||
-      ""
-  );
-
-  return db.bots.find(
-    bot =>
-      String(bot.id) === id &&
-      String(bot.ownerId) ===
-        String(req.session.userId)
+function sleep(ms) {
+  return new Promise(resolve =>
+    setTimeout(resolve, ms)
   );
 }
 
-/* =========================
+function addActivity(
+  type,
+  title,
+  details = "",
+  meta = {}
+) {
+  db.activities.unshift({
+    id: makeId(),
+    type,
+    title,
+    details,
+    meta,
+    createdAt: Date.now()
+  });
+
+  db.activities =
+    db.activities.slice(0, 300);
+
+  saveDB();
+}
+
+/* =====================================================
    TELEGRAM API
-========================= */
+===================================================== */
 
-function telegramUrl(
-  token,
-  method
-) {
+function telegramUrl(token, method) {
   return (
     `https://api.telegram.org/bot` +
     `${token}/${method}`
@@ -304,32 +166,25 @@ async function telegram(
   method,
   body = {}
 ) {
-  const response =
-    await fetch(
-      telegramUrl(
-        token,
-        method
-      ),
-      {
-        method: "POST",
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
-        body: JSON.stringify(
-          body
-        )
-      }
-    );
+  const response = await fetch(
+    telegramUrl(token, method),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/json"
+      },
+      body: JSON.stringify(body)
+    }
+  );
 
   let data;
 
   try {
-    data =
-      await response.json();
+    data = await response.json();
   } catch {
     throw new Error(
-      "پاسخ Telegram نامعتبر بود."
+      "پاسخ نامعتبر از تلگرام"
     );
   }
 
@@ -343,121 +198,1761 @@ async function telegram(
   return data.result;
 }
 
-async function sendTelegramMessage(
-  bot,
-  chatId,
-  text,
-  replyMarkup = null
-) {
-  const body = {
-    chat_id: chatId,
-    text
-  };
+/* =====================================================
+   SESSION
+===================================================== */
 
-  if (replyMarkup) {
-    body.reply_markup =
-      replyMarkup;
+app.use(
+  express.urlencoded({
+    extended: true
+  })
+);
+
+app.use(express.json());
+
+app.use(
+  session({
+    secret:
+      process.env.SESSION_SECRET ||
+      "nova-proxy-secret",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      maxAge:
+        1000 * 60 * 60 * 24 * 7
+    }
+  })
+);
+
+/* =====================================================
+   AUTH
+===================================================== */
+
+function requireLogin(req, res, next) {
+  if (!req.session.userId) {
+    return res.redirect("/login");
   }
 
-  return telegram(
-    bot.token,
-    "sendMessage",
-    body
+  next();
+}
+
+function requireCreator(req, res, next) {
+  if (!req.session.creator) {
+    return res.redirect(
+      "/creator/login"
+    );
+  }
+
+  next();
+}
+
+function getUserBots(req) {
+  return db.bots.filter(
+    bot =>
+      bot.ownerId ===
+      req.session.userId
   );
 }
 
-async function sendTelegramPhoto(
-  bot,
-  chatId,
-  photo,
-  caption = ""
-) {
-  const body = {
-    chat_id: chatId,
-    photo
-  };
-
-  if (caption) {
-    body.caption =
-      caption;
-  }
-
-  return telegram(
-    bot.token,
-    "sendPhoto",
-    body
+function getBotForUser(req, id) {
+  return db.bots.find(
+    bot =>
+      bot.id === id &&
+      bot.ownerId ===
+        req.session.userId
   );
 }
 
-async function sendTelegramVideo(
-  bot,
-  chatId,
-  video,
-  caption = ""
+/* =====================================================
+   HTML PAGE
+===================================================== */
+
+function page(
+  title,
+  content,
+  options = {}
 ) {
-  const body = {
-    chat_id: chatId,
-    video
-  };
+  const loggedIn =
+    !!options.loggedIn;
 
-  if (caption) {
-    body.caption =
-      caption;
-  }
+  const creator =
+    !!options.creator;
 
-  return telegram(
-    bot.token,
-    "sendVideo",
-    body
-  );
+  return `
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+
+<head>
+
+<meta charset="UTF-8">
+
+<meta
+  name="viewport"
+  content="width=device-width,initial-scale=1.0"
+>
+
+<title>
+${esc(title)} - Nova Proxy
+</title>
+
+<style>
+
+* {
+  box-sizing: border-box;
 }
 
-async function deleteTelegramMessage(
-  bot,
-  chatId,
-  messageId
-) {
-  try {
-    await telegram(
-      bot.token,
-      "deleteMessage",
-      {
-        chat_id: chatId,
-        message_id:
-          messageId
-      }
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: Tahoma, Arial, sans-serif;
+  color: #172033;
+  background:
+    radial-gradient(
+      circle at top right,
+      #8b5cf655,
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at bottom left,
+      #00c2ff44,
+      transparent 30%
+    ),
+    linear-gradient(
+      135deg,
+      #eef2ff,
+      #ffffff
+    );
+}
+
+body.dark {
+  color: #f5f7ff;
+  background:
+    radial-gradient(
+      circle at top right,
+      #7c3aed55,
+      transparent 30%
+    ),
+    radial-gradient(
+      circle at bottom left,
+      #0891b255,
+      transparent 30%
+    ),
+    #0f1524;
+}
+
+a {
+  text-decoration: none;
+  color: inherit;
+}
+
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+.topbar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 68px;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  padding: 0 75px;
+  background: rgba(255,255,255,.75);
+  backdrop-filter: blur(18px);
+  border-bottom: 1px solid #ffffff66;
+}
+
+body.dark .topbar {
+  background: rgba(15,21,36,.8);
+}
+
+.top-title {
+  font-weight: 900;
+  font-size: 18px;
+}
+
+.container {
+  width: min(
+    1180px,
+    calc(100% - 28px)
+  );
+  margin: auto;
+  padding-top: 95px;
+  padding-bottom: 40px;
+}
+
+.card {
+  background: rgba(255,255,255,.78);
+  backdrop-filter: blur(18px);
+  border-radius: 24px;
+  padding: 22px;
+  margin-bottom: 18px;
+  box-shadow:
+    0 15px 45px
+    rgba(35,45,80,.1);
+}
+
+body.dark .card {
+  background: rgba(25,31,48,.85);
+  box-shadow:
+    0 15px 45px
+    rgba(0,0,0,.3);
+}
+
+h1 {
+  margin-top: 0;
+  font-size: 28px;
+}
+
+h2 {
+  margin-top: 0;
+}
+
+.muted {
+  opacity: .65;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns:
+    repeat(
+      auto-fit,
+      minmax(210px,1fr)
+    );
+  gap: 16px;
+}
+
+.stat {
+  padding: 22px;
+  border-radius: 22px;
+  background:
+    linear-gradient(
+      135deg,
+      #7657ff22,
+      #00bfff22
+    );
+}
+
+.stat-number {
+  margin-top: 8px;
+  font-size: 32px;
+  font-weight: 900;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 45px;
+  padding: 10px 17px;
+  border: 0;
+  border-radius: 14px;
+  cursor: pointer;
+  color: white;
+  font-weight: 800;
+  background:
+    linear-gradient(
+      135deg,
+      #7657ff,
+      #00a8ff
+    );
+}
+
+.btn-danger {
+  background:
+    linear-gradient(
+      135deg,
+      #ff416c,
+      #ff7043
+    );
+}
+
+.btn-secondary {
+  color: #172033;
+  background: #e8edf7;
+}
+
+body.dark .btn-secondary {
+  color: white;
+  background: #293247;
+}
+
+.btn-success {
+  background:
+    linear-gradient(
+      135deg,
+      #00b894,
+      #00cec9
+    );
+}
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+label {
+  display: block;
+  margin-bottom: 8px;
+  font-weight: 800;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  padding: 13px;
+  border-radius: 14px;
+  border: 1px solid #d8deea;
+  outline: none;
+  background: white;
+  color: #172033;
+}
+
+body.dark input,
+body.dark textarea,
+body.dark select {
+  background: #171e2d;
+  color: white;
+  border-color: #30394e;
+}
+
+textarea {
+  min-height: 150px;
+  resize: vertical;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.list-item {
+  padding: 17px;
+  border-radius: 18px;
+  margin-bottom: 10px;
+  background: #ffffff80;
+}
+
+body.dark .list-item {
+  background: #ffffff08;
+}
+
+.alert {
+  padding: 14px;
+  border-radius: 15px;
+  margin-bottom: 15px;
+  font-weight: 700;
+}
+
+.alert-error {
+  background: #ffe1e8;
+  color: #a40025;
+}
+
+.alert-success {
+  background: #dcfff1;
+  color: #007453;
+}
+
+body.dark .alert-error {
+  background: #461e2b;
+  color: #ffb9c6;
+}
+
+body.dark .alert-success {
+  background: #123b31;
+  color: #a5ffe1;
+}
+
+.empty {
+  text-align: center;
+  padding: 35px 15px;
+  opacity: .6;
+}
+
+.timeline-item {
+  position: relative;
+  padding:
+    0 25px 22px 0;
+  border-right:
+    2px solid #d8deed;
+}
+
+body.dark .timeline-item {
+  border-color: #30394e;
+}
+
+.timeline-item::before {
+  content: "";
+  position: absolute;
+  right: -7px;
+  top: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background:
+    linear-gradient(
+      135deg,
+      #7657ff,
+      #00a8ff
+    );
+}
+
+.timeline-title {
+  font-weight: 900;
+}
+
+.timeline-date {
+  font-size: 12px;
+  opacity: .55;
+  margin-top: 5px;
+}
+
+.icon-btn {
+  position: fixed;
+  z-index: 1200;
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 14px;
+  cursor: pointer;
+  background: white;
+  box-shadow:
+    0 7px 25px #00000015;
+  font-size: 20px;
+}
+
+body.dark .icon-btn {
+  background: #20283a;
+  color: white;
+}
+
+.menu-toggle {
+  top: 13px;
+  right: 15px;
+}
+
+.refresh-btn {
+  top: 13px;
+  left: 15px;
+}
+
+.theme-btn {
+  top: 13px;
+  left: 66px;
+}
+
+.side-menu {
+  position: fixed;
+  top: 0;
+  right: -340px;
+  width: 310px;
+  height: 100vh;
+  z-index: 1100;
+  padding: 80px 15px 20px;
+  overflow-y: auto;
+  background: rgba(255,255,255,.97);
+  box-shadow:
+    -20px 0 60px #00000025;
+  transition: .3s;
+}
+
+body.dark .side-menu {
+  background: #121827;
+}
+
+.side-menu.open {
+  right: 0;
+}
+
+.side-title {
+  font-size: 24px;
+  font-weight: 900;
+  padding: 10px 14px 20px;
+}
+
+.side-menu a {
+  display: block;
+  padding: 14px;
+  border-radius: 14px;
+  margin: 5px 0;
+  font-weight: 800;
+}
+
+.side-menu a:hover {
+  background: #7657ff18;
+}
+
+.side-menu .logout {
+  color: #e52f58;
+}
+
+.side-menu .creator-link {
+  margin-top: 18px;
+  border-top: 1px solid #00000010;
+  padding-top: 20px;
+}
+
+.menu-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: #00000055;
+}
+
+.menu-overlay.show {
+  display: block;
+}
+
+.auth {
+  width: min(
+    460px,
+    calc(100% - 25px)
+  );
+  margin: 100px auto;
+}
+
+.center {
+  text-align: center;
+}
+
+.badge {
+  display: inline-block;
+  padding: 5px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 800;
+  background: #e7eaff;
+  color: #5948ca;
+}
+
+body.dark .badge {
+  background: #302c58;
+  color: #ddd5ff;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  padding: 12px;
+  border-bottom:
+    1px solid #8890a025;
+  text-align: right;
+}
+
+@media(max-width:600px) {
+
+  .container {
+    width: calc(100% - 16px);
+  }
+
+  .card {
+    padding: 17px;
+    border-radius: 19px;
+  }
+
+  h1 {
+    font-size: 23px;
+  }
+
+  .side-menu {
+    width: 285px;
+  }
+}
+
+</style>
+
+</head>
+
+<body>
+
+${
+  loggedIn || creator
+    ? `
+<div class="topbar">
+  <div class="top-title">
+    ${esc(title)}
+  </div>
+</div>
+
+<button
+  class="icon-btn refresh-btn"
+  onclick="location.reload()"
+>
+⟳
+</button>
+
+<button
+  class="icon-btn theme-btn"
+  onclick="toggleTheme()"
+>
+☾
+</button>
+
+<button
+  class="icon-btn menu-toggle"
+  onclick="toggleMenu()"
+>
+☰
+</button>
+
+<div
+  id="menuOverlay"
+  class="menu-overlay"
+  onclick="toggleMenu()"
+></div>
+
+<aside
+  id="sideMenu"
+  class="side-menu"
+>
+
+<div class="side-title">
+Nova Proxy
+</div>
+
+${
+  loggedIn
+    ? `
+
+<a href="/dashboard">
+📊 داشبورد
+</a>
+
+<a href="/bots">
+🤖 ربات ها
+</a>
+
+<a href="/bots/add">
+➕ افزودن ربات
+</a>
+
+<a href="/forcejoin">
+🔐 عضویت اجباری
+</a>
+
+<a href="/broadcast">
+📢 ارسال پیام به همه کاربران
+</a>
+
+<a href="/commands/add">
+➕ افزودن دستور
+</a>
+
+<a href="/commands">
+⚡ دستورات
+</a>
+
+<a href="/users">
+👥 آمار کاربران
+</a>
+
+<a
+  class="logout"
+  href="/logout"
+>
+🚪 خروج
+</a>
+
+<a
+  class="creator-link"
+  href="/creator/login"
+>
+👑 ورود سازنده
+</a>
+
+`
+    : `
+
+<a href="/creator">
+👑 پنل سازنده
+</a>
+
+<a
+  class="logout"
+  href="/creator/logout"
+>
+🚪 خروج سازنده
+</a>
+
+`
+}
+
+</aside>
+`
+    : ""
+}
+
+<div class="container">
+
+${content}
+
+</div>
+
+<script>
+
+function toggleMenu() {
+
+  const menu =
+    document.getElementById(
+      "sideMenu"
     );
 
-    return true;
-  } catch {
-    return false;
-  }
+  const overlay =
+    document.getElementById(
+      "menuOverlay"
+    );
+
+  menu.classList.toggle("open");
+
+  overlay.classList.toggle("show");
 }
 
-/* =========================
-   FORCE JOIN
-========================= */
+function toggleTheme() {
 
-function ensureForceJoinState(
-  bot
+  document.body.classList.toggle(
+    "dark"
+  );
+
+  localStorage.setItem(
+    "nova-theme",
+    document.body.classList.contains(
+      "dark"
+    )
+      ? "dark"
+      : "light"
+  );
+}
+
+if (
+  localStorage.getItem(
+    "nova-theme"
+  ) === "dark"
 ) {
+  document.body.classList.add(
+    "dark"
+  );
+}
+
+</script>
+
+</body>
+</html>
+`;
+}
+
+/* =====================================================
+   LOGIN
+===================================================== */
+
+app.get("/login", (req, res) => {
+
+  res.send(
+    page(
+      "ورود",
+      `
+<div class="auth">
+
+<div class="card">
+
+<h1>🔐 ورود</h1>
+
+${
+  req.query.error
+    ? `
+<div class="alert alert-error">
+${esc(req.query.error)}
+</div>
+`
+    : ""
+}
+
+<form
+  method="POST"
+  action="/login"
+>
+
+<div class="form-group">
+
+<label>
+نام کاربری
+</label>
+
+<input
+  name="username"
+  required
+>
+
+</div>
+
+<div class="form-group">
+
+<label>
+رمز عبور
+</label>
+
+<input
+  type="password"
+  name="password"
+  required
+>
+
+</div>
+
+<button
+  class="btn"
+  type="submit"
+>
+ورود
+</button>
+
+</form>
+
+<p>
+حساب ندارید؟
+<a href="/register">
+ثبت نام
+</a>
+</p>
+
+</div>
+
+</div>
+`
+    )
+  );
+});
+
+app.post("/login", (req, res) => {
+
+  const username =
+    String(
+      req.body.username || ""
+    ).trim();
+
+  const password =
+    String(
+      req.body.password || ""
+    );
+
+  const user =
+    db.users.find(
+      u =>
+        u.username.toLowerCase() ===
+          username.toLowerCase() &&
+        u.password === password
+    );
+
+  if (!user) {
+    return res.redirect(
+      "/login?error=" +
+        encodeURIComponent(
+          "نام کاربری یا رمز عبور اشتباه است."
+        )
+    );
+  }
+
+  req.session.userId =
+    user.id;
+
+  addActivity(
+    "login",
+    "ورود کاربر",
+    username
+  );
+
+  res.redirect(
+    "/dashboard"
+  );
+});
+
+/* =====================================================
+   REGISTER
+===================================================== */
+
+app.get("/register", (req, res) => {
+
+  res.send(
+    page(
+      "ثبت نام",
+      `
+<div class="auth">
+
+<div class="card">
+
+<h1>📝 ثبت نام</h1>
+
+${
+  req.query.error
+    ? `
+<div class="alert alert-error">
+${esc(req.query.error)}
+</div>
+`
+    : ""
+}
+
+<form
+  method="POST"
+  action="/register"
+>
+
+<div class="form-group">
+
+<label>
+نام کاربری
+</label>
+
+<input
+  name="username"
+  required
+>
+
+</div>
+
+<div class="form-group">
+
+<label>
+رمز عبور
+</label>
+
+<input
+  type="password"
+  name="password"
+  required
+>
+
+</div>
+
+<button
+  class="btn"
+  type="submit"
+>
+ثبت نام
+</button>
+
+</form>
+
+<p>
+قبلاً ثبت نام کرده‌اید؟
+<a href="/login">
+ورود
+</a>
+</p>
+
+</div>
+
+</div>
+`
+    )
+  );
+});
+
+app.post("/register", (req, res) => {
+
+  const username =
+    String(
+      req.body.username || ""
+    ).trim();
+
+  const password =
+    String(
+      req.body.password || ""
+    );
+
+  if (!username || !password) {
+    return res.redirect(
+      "/register?error=" +
+        encodeURIComponent(
+          "اطلاعات را کامل وارد کنید."
+        )
+    );
+  }
+
   if (
-    !Array.isArray(
-      bot.forceJoins
+    db.users.some(
+      u =>
+        u.username.toLowerCase() ===
+        username.toLowerCase()
     )
   ) {
+    return res.redirect(
+      "/register?error=" +
+        encodeURIComponent(
+          "این نام کاربری قبلاً وجود دارد."
+        )
+    );
+  }
+
+  const user = {
+    id: makeId(),
+    username,
+    password,
+    createdAt: Date.now()
+  };
+
+  db.users.push(user);
+
+  saveDB();
+
+  req.session.userId =
+    user.id;
+
+  addActivity(
+    "register",
+    "ثبت نام کاربر جدید",
+    username
+  );
+
+  res.redirect(
+    "/dashboard"
+  );
+});
+
+/* =====================================================
+   LOGOUT
+===================================================== */
+
+app.get("/logout", (req, res) => {
+
+  req.session.destroy(() => {
+    res.redirect("/login");
+  });
+
+});
+
+/* =====================================================
+   DASHBOARD
+===================================================== */
+
+function totalBotUsers() {
+
+  const ids = new Set();
+
+  for (const bot of db.bots) {
+
+    for (
+      const id of Object.keys(
+        db.botUsers[bot.id] || {}
+      )
+    ) {
+      ids.add(id);
+    }
+
+  }
+
+  return ids.size;
+}
+
+app.get(
+  "/dashboard",
+  requireLogin,
+  (req, res) => {
+
+    const bots =
+      getUserBots(req);
+
+    const botIds =
+      new Set(
+        bots.map(
+          b => b.id
+        )
+      );
+
+    const commands =
+      bots.reduce(
+        (sum, bot) =>
+          sum +
+          Object.keys(
+            db.commands[bot.id] || {}
+          ).length,
+        0
+      );
+
+    const force =
+      bots.reduce(
+        (sum, bot) =>
+          sum +
+          (
+            Array.isArray(
+              bot.forceJoins
+            )
+              ? bot.forceJoins.length
+              : 0
+          ),
+        0
+      );
+
+    const activities =
+      db.activities
+        .filter(
+          a =>
+            !a.meta?.botId ||
+            botIds.has(
+              a.meta.botId
+            )
+        )
+        .slice(0, 15);
+
+    res.send(
+      page(
+        "داشبورد",
+        `
+<h1>📊 داشبورد</h1>
+
+<div class="grid">
+
+<div class="stat">
+🤖 ربات ها
+<div class="stat-number">
+${bots.length}
+</div>
+</div>
+
+<div class="stat">
+👥 کاربران تلگرام
+<div class="stat-number">
+${totalBotUsers()}
+</div>
+</div>
+
+<div class="stat">
+⚡ دستورات
+<div class="stat-number">
+${commands}
+</div>
+</div>
+
+<div class="stat">
+🔐 عضویت اجباری
+<div class="stat-number">
+${force}
+</div>
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>
+🎬 فعالیت‌های اخیر
+</h2>
+
+${
+  activities.length
+    ? activities
+        .map(
+          a => `
+<div class="timeline-item">
+
+<div class="timeline-title">
+${esc(a.title)}
+</div>
+
+<div>
+${esc(a.details)}
+</div>
+
+<div class="timeline-date">
+${new Date(
+  a.createdAt
+).toLocaleString("fa-IR")}
+</div>
+
+</div>
+`
+        )
+        .join("")
+    : `
+<div class="empty">
+هنوز فعالیتی ثبت نشده است.
+</div>
+`
+}
+
+</div>
+`
+      )
+    );
+  }
+);
+
+/* =====================================================
+   BOTS
+===================================================== */
+
+app.get(
+  "/bots",
+  requireLogin,
+  (req, res) => {
+
+    const bots =
+      getUserBots(req);
+
+    res.send(
+      page(
+        "ربات ها",
+        `
+<div class="item-row">
+
+<div>
+
+<h1>
+🤖 ربات ها
+</h1>
+
+<p class="muted">
+مدیریت ربات‌های شما
+</p>
+
+</div>
+
+<a
+  class="btn"
+  href="/bots/add"
+>
+➕ افزودن ربات
+</a>
+
+</div>
+
+<div class="card">
+
+${
+  bots.length
+    ? bots
+        .map(
+          bot => `
+<div class="list-item">
+
+<div class="item-row">
+
+<div>
+
+<strong>
+🤖 ${esc(bot.name)}
+</strong>
+
+<div class="muted">
+@${esc(bot.username)}
+</div>
+
+</div>
+
+<div class="form-actions">
+
+<a
+  class="btn"
+  href="/bots/${encodeURIComponent(
+    bot.id
+  )}"
+>
+مدیریت
+</a>
+
+<a
+  class="btn btn-danger"
+  href="/bots/delete?id=${encodeURIComponent(
+    bot.id
+  )}"
+  onclick="
+    return confirm(
+      'این ربات حذف شود؟'
+    )
+  "
+>
+حذف
+</a>
+
+</div>
+
+</div>
+
+</div>
+`
+        )
+        .join("")
+    : `
+<div class="empty">
+هنوز رباتی اضافه نکرده‌اید.
+</div>
+`
+}
+
+</div>
+`
+      )
+    );
+  }
+);
+
+app.get(
+  "/bots/add",
+  requireLogin,
+  (req, res) => {
+
+    res.send(
+      page(
+        "افزودن ربات",
+        `
+<h1>
+➕ افزودن ربات
+</h1>
+
+${
+  req.query.error
+    ? `
+<div class="alert alert-error">
+${esc(req.query.error)}
+</div>
+`
+    : ""
+}
+
+<div class="card">
+
+<form
+  method="POST"
+  action="/bots/add"
+>
+
+<div class="form-group">
+
+<label>
+نام ربات
+</label>
+
+<input
+  name="name"
+  placeholder="Nova Bot"
+  required
+>
+
+</div>
+
+<div class="form-group">
+
+<label>
+توکن ربات
+</label>
+
+<input
+  name="token"
+  placeholder="123456:ABC..."
+  required
+>
+
+</div>
+
+<button
+  class="btn"
+  type="submit"
+>
+➕ افزودن ربات
+</button>
+
+</form>
+
+</div>
+`
+      )
+    );
+  }
+);
+
+app.post(
+  "/bots/add",
+  requireLogin,
+  async (req, res) => {
+
+    const name =
+      String(
+        req.body.name || ""
+      ).trim();
+
+    const token =
+      String(
+        req.body.token || ""
+      ).trim();
+
+    if (!name || !token) {
+      return res.redirect(
+        "/bots/add?error=" +
+          encodeURIComponent(
+            "نام و توکن را وارد کنید."
+          )
+      );
+    }
+
+    try {
+
+      const me =
+        await telegram(
+          token,
+          "getMe"
+        );
+
+      const exists =
+        db.bots.some(
+          b =>
+            b.token === token &&
+            b.ownerId ===
+              req.session.userId
+        );
+
+      if (exists) {
+        return res.redirect(
+          "/bots/add?error=" +
+            encodeURIComponent(
+              "این ربات قبلاً اضافه شده است."
+            )
+        );
+      }
+
+      const bot = {
+        id: makeId(),
+        ownerId:
+          req.session.userId,
+        name,
+        token,
+        username:
+          me.username || "",
+        telegramId:
+          me.id,
+        createdAt:
+          Date.now(),
+        forceJoins: []
+      };
+
+      db.bots.push(bot);
+
+      db.botUsers[bot.id] = {};
+      db.commands[bot.id] = {};
+      db.forceJoinVerified[
+        bot.id
+      ] = {};
+
+      saveDB();
+
+      addActivity(
+        "bot_add",
+        "ربات جدید اضافه شد",
+        `@${me.username || name}`,
+        {
+          botId: bot.id
+        }
+      );
+
+      startBotPolling(bot);
+
+      res.redirect("/bots");
+
+    } catch (err) {
+
+      res.redirect(
+        "/bots/add?error=" +
+          encodeURIComponent(
+            "توکن نامعتبر است: " +
+              err.message
+          )
+      );
+    }
+  }
+);
+
+app.get(
+  "/bots/delete",
+  requireLogin,
+  (req, res) => {
+
+    const id =
+      String(
+        req.query.id || ""
+      );
+
+    const index =
+      db.bots.findIndex(
+        bot =>
+          bot.id === id &&
+          bot.ownerId ===
+            req.session.userId
+      );
+
+    if (index === -1) {
+      return res.redirect(
+        "/bots"
+      );
+    }
+
+    const bot =
+      db.bots[index];
+
+    stopBotPolling(
+      bot.id
+    );
+
+    db.bots.splice(
+      index,
+      1
+    );
+
+    delete db.botUsers[
+      bot.id
+    ];
+
+    delete db.commands[
+      bot.id
+    ];
+
+    delete db.forceJoinVerified[
+      bot.id
+    ];
+
+    saveDB();
+
+    addActivity(
+      "bot_delete",
+      "ربات حذف شد",
+      bot.name
+    );
+
+    res.redirect(
+      "/bots"
+    );
+  }
+);
+
+app.get(
+  "/bots/:id",
+  requireLogin,
+  (req, res) => {
+
+    const bot =
+      getBotForUser(
+        req,
+        req.params.id
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    const commands =
+      Object.keys(
+        db.commands[
+          bot.id
+        ] || {}
+      ).length;
+
+    const users =
+      Object.keys(
+        db.botUsers[
+          bot.id
+        ] || {}
+      ).length;
+
+    const force =
+      bot.forceJoins.length;
+
+    res.send(
+      page(
+        bot.name,
+        `
+<h1>
+🤖 ${esc(bot.name)}
+</h1>
+
+<div class="grid">
+
+<div class="stat">
+👥 کاربران
+<div class="stat-number">
+${users}
+</div>
+</div>
+
+<div class="stat">
+⚡ دستورات
+<div class="stat-number">
+${commands}
+</div>
+</div>
+
+<div class="stat">
+🔐 عضویت اجباری
+<div class="stat-number">
+${force}
+</div>
+</div>
+
+</div>
+
+<div class="card">
+
+<h2>
+مدیریت ربات
+</h2>
+
+<div class="form-actions">
+
+<a
+  class="btn"
+  href="/forcejoin?bot=${encodeURIComponent(
+    bot.id
+  )}"
+>
+🔐 عضویت اجباری
+</a>
+
+<a
+  class="btn"
+  href="/commands?bot=${encodeURIComponent(
+    bot.id
+  )}"
+>
+⚡ دستورات
+</a>
+
+<a
+  class="btn"
+  href="/broadcast?bot=${encodeURIComponent(
+    bot.id
+  )}"
+>
+📢 ارسال پیام
+</a>
+
+<a
+  class="btn"
+  href="/users?bot=${encodeURIComponent(
+    bot.id
+  )}"
+>
+👥 کاربران
+</a>
+
+</div>
+
+</div>
+`
+      )
+    );
+  }
+);
+
+/* =====================================================
+   BOT PICKER
+===================================================== */
+
+function botPickerPage(
+  req,
+  title,
+  pathName
+) {
+
+  const bots =
+    getUserBots(req);
+
+  return page(
+    title,
+    `
+<h1>
+${esc(title)}
+</h1>
+
+<div class="card">
+
+${
+  bots.length
+    ? bots
+        .map(
+          bot => `
+<div class="list-item">
+
+<div class="item-row">
+
+<div>
+
+<strong>
+🤖 ${esc(bot.name)}
+</strong>
+
+<div class="muted">
+@${esc(bot.username)}
+</div>
+
+</div>
+
+<a
+  class="btn"
+  href="${pathName}?bot=${encodeURIComponent(
+    bot.id
+  )}"
+>
+انتخاب
+</a>
+
+</div>
+
+</div>
+`
+        )
+        .join("")
+    : `
+<div class="empty">
+ابتدا یک ربات اضافه کنید.
+</div>
+`
+}
+
+</div>
+`
+  );
+}
+
+/* =====================================================
+   FORCE JOIN
+===================================================== */
+
+function ensureForceJoinState(bot) {
+
+  if (!Array.isArray(
+    bot.forceJoins
+  )) {
     bot.forceJoins = [];
   }
 
-  if (
-    !bot.forceJoinVerified ||
-    typeof bot.forceJoinVerified !==
-      "object" ||
-    Array.isArray(
-      bot.forceJoinVerified
-    )
-  ) {
-    bot.forceJoinVerified = {};
+  if (!db.forceJoinVerified[
+    bot.id
+  ]) {
+    db.forceJoinVerified[
+      bot.id
+    ] = {};
   }
 
   let changed = false;
@@ -465,10 +1960,12 @@ function ensureForceJoinState(
   for (
     const join of bot.forceJoins
   ) {
+
     if (!join.id) {
       join.id = makeId();
       changed = true;
     }
+
   }
 
   if (changed) {
@@ -476,79 +1973,68 @@ function ensureForceJoinState(
   }
 }
 
-function getVerifiedJoins(
+function getVerified(
   bot,
   userId
 ) {
-  ensureForceJoinState(bot);
+
+  ensureForceJoinState(
+    bot
+  );
 
   const key =
     String(userId);
 
   if (
-    !bot.forceJoinVerified[
-      key
-    ]
+    !db.forceJoinVerified[
+      bot.id
+    ][key]
   ) {
-    bot.forceJoinVerified[
-      key
-    ] = {};
+    db.forceJoinVerified[
+      bot.id
+    ][key] = {};
+
+    saveDB();
   }
 
-  return bot.forceJoinVerified[
-    key
-  ];
+  return db.forceJoinVerified[
+    bot.id
+  ][key];
 }
 
-function getUnverifiedJoins(
-  bot,
-  userId
-) {
-  const verified =
-    getVerifiedJoins(
-      bot,
-      userId
-    );
-
-  return bot.forceJoins.filter(
-    join =>
-      !verified[
-        String(join.id)
-      ]
-  );
-}
-
-function markJoinVerified(
+function markVerified(
   bot,
   userId,
   joinId
 ) {
+
   const verified =
-    getVerifiedJoins(
+    getVerified(
       bot,
       userId
     );
 
-  verified[
-    String(joinId)
-  ] = true;
+  verified[joinId] =
+    true;
+
+  saveDB();
 }
 
 async function checkMembership(
   bot,
-  username,
+  chatId,
   userId
 ) {
+
   try {
+
     const member =
       await telegram(
         bot.token,
         "getChatMember",
         {
-          chat_id:
-            username,
-          user_id:
-            userId
+          chat_id: chatId,
+          user_id: userId
         }
       );
 
@@ -566,99 +2052,97 @@ async function checkMembership(
     if (
       member.status ===
         "restricted" &&
-      member.is_member ===
-        true
+      member.is_member === true
     ) {
       return true;
     }
 
     return false;
-  } catch (error) {
+
+  } catch (err) {
+
     console.error(
-      "Membership check:",
-      error.message
+      "Membership error:",
+      err.message
     );
 
     return false;
   }
 }
 
+/*
+ * مهم‌ترین تابع عضویت اجباری
+ */
 async function checkAllMemberships(
   bot,
   userId
 ) {
+
   ensureForceJoinState(
     bot
   );
 
-  const unverified =
-    getUnverifiedJoins(
+  const verified =
+    getVerified(
       bot,
       userId
     );
 
-  /*
-    اگر همه موارد قبلاً تأیید شده‌اند
-    دیگر Telegram را برای آنها بررسی نمی‌کنیم.
-  */
-  if (
-    unverified.length === 0
-  ) {
-    return {
-      ok: true
-    };
-  }
-
-  let changed = false;
+  const missing = [];
 
   for (
-    const join of unverified
+    const join of bot.forceJoins
   ) {
-    const isMember =
+
+    /*
+     * اگر قبلاً تأیید شده،
+     * دیگر بررسی نمی‌شود.
+     */
+    if (
+      verified[join.id] === true
+    ) {
+      continue;
+    }
+
+    const member =
       await checkMembership(
         bot,
         join.username,
         userId
       );
 
-    if (!isMember) {
-      if (changed) {
-        saveDB();
-      }
+    if (member) {
 
-      return {
-        ok: false,
-        missing: join
-      };
+      markVerified(
+        bot,
+        userId,
+        join.id
+      );
+
+    } else {
+
+      missing.push(
+        join
+      );
     }
-
-    markJoinVerified(
-      bot,
-      userId,
-      join.id
-    );
-
-    changed = true;
-  }
-
-  if (changed) {
-    saveDB();
   }
 
   return {
-    ok: true
+    ok:
+      missing.length === 0,
+    missing
   };
 }
 
-function parsePublicTelegramLink(
-  input
+function parseTelegramLink(
+  value
 ) {
-  let value =
-    String(
-      input || ""
-    ).trim();
 
-  if (!value) {
+  let input =
+    String(value || "")
+      .trim();
+
+  if (!input) {
     throw new Error(
       "لینک را وارد کنید."
     );
@@ -666,75 +2150,80 @@ function parsePublicTelegramLink(
 
   if (
     !/^https?:\/\//i.test(
-      value
+      input
     )
   ) {
-    value =
+    input =
       "https://" +
-      value;
+      input;
   }
 
-  let url;
+  const url =
+    new URL(input);
 
-  try {
-    url =
-      new URL(value);
-  } catch {
+  const host =
+    url.hostname.toLowerCase();
+
+  if (
+    host !== "t.me" &&
+    host !== "www.t.me" &&
+    host !== "telegram.me" &&
+    host !== "www.telegram.me"
+  ) {
     throw new Error(
-      "لینک معتبر نیست."
+      "فقط لینک t.me قابل استفاده است."
     );
   }
 
-  if (
-    url.hostname !==
-      "t.me" &&
-    url.hostname !==
-      "telegram.me"
-  ) {
+  const parts =
+    url.pathname
+      .split("/")
+      .filter(Boolean);
+
+  if (!parts.length) {
     throw new Error(
-      "فقط لینک عمومی t.me قابل استفاده است."
+      "آیدی پیدا نشد."
     );
   }
 
   const username =
-    url.pathname
-      .replace(
-        /^\/+/,
-        ""
-      )
-      .split("/")[0]
-      .trim();
+    parts[0];
 
   if (
-    !username ||
+    username.startsWith("+") ||
     username.startsWith(
-      "+"
+      "joinchat"
     )
   ) {
     throw new Error(
-      "لینک دعوت خصوصی قابل استفاده نیست."
+      "لینک دعوت خصوصی پشتیبانی نمی‌شود."
     );
   }
 
-  const clean =
-    username.replace(
-      /^@/,
-      ""
+  if (
+    !/^[A-Za-z0-9_]{5,}$/.test(
+      username
+    )
+  ) {
+    throw new Error(
+      "آیدی عمومی معتبر نیست."
     );
+  }
 
   return {
     username:
-      "@" + clean,
+      "@" + username,
     link:
       "https://t.me/" +
-      clean
+      username
   };
 }
 
-async function checkBotAdminInChat(
+async function checkBotAdmin(
   bot,
-  chatUsername
+  chatId
 ) {
+
   const me =
     await telegram(
       bot.token,
@@ -746,45 +2235,515 @@ async function checkBotAdminInChat(
       bot.token,
       "getChatMember",
       {
-        chat_id:
-          chatUsername,
-        user_id:
-          me.id
+        chat_id: chatId,
+        user_id: me.id
       }
     );
 
-  return (
-    member.status ===
-      "administrator" ||
-    member.status ===
+  if (
+    member.status !==
+      "administrator" &&
+    member.status !==
       "creator"
-  );
+  ) {
+    throw new Error(
+      "ربات باید در کانال یا گروه ادمین باشد."
+    );
+  }
 }
+
+/* =====================================================
+   FORCE JOIN PAGE
+===================================================== */
+
+app.get(
+  "/forcejoin",
+  requireLogin,
+  (req, res) => {
+
+    const botId =
+      String(
+        req.query.bot || ""
+      );
+
+    if (!botId) {
+
+      return res.send(
+        botPickerPage(
+          req,
+          "🔐 عضویت اجباری",
+          "/forcejoin"
+        )
+      );
+    }
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    ensureForceJoinState(
+      bot
+    );
+
+    res.send(
+      page(
+        "عضویت اجباری",
+        `
+<h1>
+🔐 عضویت اجباری
+</h1>
+
+<div class="card">
+
+<h2>
+🤖 ${esc(bot.name)}
+</h2>
+
+<p>
+عضویت اجباری فقط برای
+<b>/start</b>
+فعال است.
+</p>
+
+<a
+  class="btn"
+  href="/forcejoin/add?bot=${encodeURIComponent(
+    bot.id
+  )}"
+>
+➕ افزودن کانال یا گروه
+</a>
+
+</div>
+
+<div class="card">
+
+<h2>
+کانال‌ها و گروه‌ها
+</h2>
+
+${
+  bot.forceJoins.length
+    ? bot.forceJoins
+        .map(
+          join => `
+<div class="list-item">
+
+<div class="item-row">
+
+<div>
+
+<strong>
+📢 ${esc(join.title)}
+</strong>
+
+<div class="muted">
+${esc(join.username)}
+</div>
+
+</div>
+
+<a
+  class="btn btn-danger"
+  href="/forcejoin/delete?bot=${encodeURIComponent(
+    bot.id
+  )}&join=${encodeURIComponent(
+    join.id
+  )}"
+  onclick="
+    return confirm(
+      'حذف شود؟'
+    )
+  "
+>
+حذف
+</a>
+
+</div>
+
+</div>
+`
+        )
+        .join("")
+    : `
+<div class="empty">
+هنوز عضویت اجباری اضافه نشده است.
+</div>
+`
+}
+
+</div>
+`
+      )
+    );
+  }
+);
+
+/* =====================================================
+   ADD FORCE JOIN
+===================================================== */
+
+app.get(
+  "/forcejoin/add",
+  requireLogin,
+  (req, res) => {
+
+    const botId =
+      String(
+        req.query.bot || ""
+      );
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    res.send(
+      page(
+        "افزودن عضویت اجباری",
+        `
+<h1>
+➕ افزودن عضویت اجباری
+</h1>
+
+${
+  req.query.error
+    ? `
+<div class="alert alert-error">
+${esc(req.query.error)}
+</div>
+`
+    : ""
+}
+
+<div class="card">
+
+<p>
+ربات باید در کانال یا گروه
+<b>ادمین</b>
+باشد.
+</p>
+
+<p class="muted">
+مثال:
+https://t.me/example
+</p>
+
+<form
+  method="POST"
+  action="/forcejoin/add"
+>
+
+<input
+  type="hidden"
+  name="botId"
+  value="${esc(bot.id)}"
+>
+
+<div class="form-group">
+
+<label>
+لینک کانال یا گروه
+</label>
+
+<input
+  name="link"
+  placeholder="https://t.me/example"
+  required
+>
+
+</div>
+
+<button
+  class="btn"
+  type="submit"
+>
+➕ افزودن
+</button>
+
+</form>
+
+</div>
+`
+      )
+    );
+  }
+);
+
+app.post(
+  "/forcejoin/add",
+  requireLogin,
+  async (req, res) => {
+
+    const botId =
+      String(
+        req.body.botId || ""
+      );
+
+    const link =
+      String(
+        req.body.link || ""
+      ).trim();
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    ensureForceJoinState(
+      bot
+    );
+
+    if (
+      bot.forceJoins.length >= 5
+    ) {
+      return res.redirect(
+        `/forcejoin/add?bot=${encodeURIComponent(
+          bot.id
+        )}&error=` +
+          encodeURIComponent(
+            "حداکثر ۵ مورد قابل اضافه کردن است."
+          )
+      );
+    }
+
+    try {
+
+      const parsed =
+        parseTelegramLink(
+          link
+        );
+
+      if (
+        bot.forceJoins.some(
+          j =>
+            j.username.toLowerCase() ===
+            parsed.username.toLowerCase()
+        )
+      ) {
+        throw new Error(
+          "این کانال یا گروه قبلاً اضافه شده است."
+        );
+      }
+
+      const chat =
+        await telegram(
+          bot.token,
+          "getChat",
+          {
+            chat_id:
+              parsed.username
+          }
+        );
+
+      if (
+        chat.type !==
+          "channel" &&
+        chat.type !==
+          "supergroup" &&
+        chat.type !==
+          "group"
+      ) {
+        throw new Error(
+          "این مورد کانال یا گروه نیست."
+        );
+      }
+
+      await checkBotAdmin(
+        bot,
+        parsed.username
+      );
+
+      const join = {
+        id: makeId(),
+        username:
+          parsed.username,
+        link:
+          parsed.link,
+        title:
+          chat.title ||
+          parsed.username,
+        type:
+          chat.type,
+        addedAt:
+          Date.now()
+      };
+
+      bot.forceJoins.push(
+        join
+      );
+
+      saveDB();
+
+      addActivity(
+        "force_add",
+        "عضویت اجباری اضافه شد",
+        join.title,
+        {
+          botId: bot.id
+        }
+      );
+
+      res.redirect(
+        `/forcejoin?bot=${encodeURIComponent(
+          bot.id
+        )}`
+      );
+
+    } catch (err) {
+
+      res.redirect(
+        `/forcejoin/add?bot=${encodeURIComponent(
+          bot.id
+        )}&error=` +
+          encodeURIComponent(
+            err.message
+          )
+      );
+    }
+  }
+);
+
+/* =====================================================
+   DELETE FORCE JOIN
+===================================================== */
+
+app.get(
+  "/forcejoin/delete",
+  requireLogin,
+  (req, res) => {
+
+    const botId =
+      String(
+        req.query.bot || ""
+      );
+
+    const joinId =
+      String(
+        req.query.join || ""
+      );
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res.redirect(
+        "/forcejoin"
+      );
+    }
+
+    const index =
+      bot.forceJoins.findIndex(
+        j =>
+          j.id === joinId
+      );
+
+    if (index === -1) {
+      return res.redirect(
+        `/forcejoin?bot=${encodeURIComponent(
+          bot.id
+        )}`
+      );
+    }
+
+    const join =
+      bot.forceJoins[index];
+
+    bot.forceJoins.splice(
+      index,
+      1
+    );
+
+    for (
+      const userId of Object.keys(
+        db.forceJoinVerified[
+          bot.id
+        ] || {}
+      )
+    ) {
+      delete db.forceJoinVerified[
+        bot.id
+      ][userId][joinId];
+    }
+
+    saveDB();
+
+    addActivity(
+      "force_delete",
+      "عضویت اجباری حذف شد",
+      join.title,
+      {
+        botId: bot.id
+      }
+    );
+
+    res.redirect(
+      `/forcejoin?bot=${encodeURIComponent(
+        bot.id
+      )}`
+    );
+  }
+);
+
+/* =====================================================
+   SEND FORCE JOIN MESSAGE
+===================================================== */
 
 async function sendJoinMessage(
   bot,
-  chatId
+  chatId,
+  missing
 ) {
-  const buttons = [];
+
+  const keyboard = [];
 
   for (
-    const join of bot.forceJoins
+    const join of missing
   ) {
-    buttons.push([
+
+    keyboard.push([
       {
         text:
-          "📢 " +
-          (
-            join.title ||
-            join.username
-          ),
+          `📢 عضویت در ${join.title}`,
         url:
           join.link
       }
     ]);
+
   }
 
-  buttons.push([
+  keyboard.push([
     {
       text:
         "✅ بررسی عضویت",
@@ -793,30 +2752,33 @@ async function sendJoinMessage(
     }
   ]);
 
-  await sendTelegramMessage(
-    bot,
-    chatId,
-    "🔐 عضویت اجباری\n\n" +
-      "برای استفاده از ربات ابتدا باید در کانال یا گروه زیر عضو شوید.\n\n" +
-      "ابتدا عضو شوید و سپس روی «بررسی عضویت» بزنید.",
+  await telegram(
+    bot.token,
+    "sendMessage",
     {
-      inline_keyboard:
-        buttons
+      chat_id: chatId,
+      text:
+        "🔐 برای استفاده از ربات ابتدا باید عضو موارد زیر شوید.\n\n" +
+        "بعد از عضویت روی «✅ بررسی عضویت» بزنید.",
+      reply_markup: {
+        inline_keyboard:
+          keyboard
+      }
     }
   );
 }
 
-/* =========================
-   COMMAND
-========================= */
+/* =====================================================
+   COMMAND SYSTEM
+===================================================== */
 
 function getCommandNameFromText(
   text
 ) {
+
   if (
     !text ||
-    typeof text !==
-      "string"
+    typeof text !== "string"
   ) {
     return null;
   }
@@ -830,9 +2792,7 @@ function getCommandNameFromText(
   const first =
     text
       .trim()
-      .split(
-        /\s+/
-      )[0];
+      .split(/\s+/)[0];
 
   let command =
     first
@@ -840,15 +2800,17 @@ function getCommandNameFromText(
       .split("@")[0]
       .trim();
 
+  if (!command) {
+    return null;
+  }
+
   command =
     command.replace(
       /[^a-zA-Z0-9_]/g,
       ""
     );
 
-  return (
-    command || null
-  );
+  return command || null;
 }
 
 async function executeCommand(
@@ -856,12 +2818,13 @@ async function executeCommand(
   chatId,
   text
 ) {
-  const commandName =
+
+  const command =
     getCommandNameFromText(
       text
     );
 
-  if (!commandName) {
+  if (!command) {
     return false;
   }
 
@@ -870,251 +2833,896 @@ async function executeCommand(
       bot.id
     ] || {};
 
-  const command =
-    commands[
-      commandName
-    ];
+  const item =
+    commands[command];
 
-  if (!command) {
+  if (!item) {
     return false;
   }
 
-  const response =
-    typeof command ===
-    "string"
-      ? command
-      : command.response ||
-        "";
-
-  if (!response) {
-    return false;
-  }
-
-  await sendTelegramMessage(
-    bot,
-    chatId,
-    response
-  );
-
-  addActivity(
-    "command",
-    `دستور /${commandName} اجرا شد.`,
-    bot.id
+  await telegram(
+    bot.token,
+    "sendMessage",
+    {
+      chat_id: chatId,
+      text: item.response
+    }
   );
 
   return true;
 }
 
-/* =========================
-   START
-========================= */
+/* =====================================================
+   COMMANDS PAGE
+===================================================== */
 
-async function handleStart(
-  bot,
-  message
-) {
-  const userId =
-    message.from.id;
+app.get(
+  "/commands",
+  requireLogin,
+  (req, res) => {
 
-  const chatId =
-    message.chat.id;
-
-  ensureForceJoinState(
-    bot
-  );
-
-  /*
-    اگر هیچ عضویت اجباری وجود ندارد:
-    مستقیم /start اجرا شود.
-  */
-  if (
-    !bot.forceJoins ||
-    bot.forceJoins.length ===
-      0
-  ) {
-    await executeCommand(
-      bot,
-      chatId,
-      "/start"
-    );
-
-    return;
-  }
-
-  /*
-    بررسی واقعی عضویت کاربر.
-  */
-  const result =
-    await checkAllMemberships(
-      bot,
-      userId
-    );
-
-  /*
-    اگر عضو نیست:
-    فقط پیام عضویت نمایش داده شود
-    و /start اجرا نشود.
-  */
-  if (!result.ok) {
-    await sendJoinMessage(
-      bot,
-      chatId
-    );
-
-    return;
-  }
-
-  /*
-    عضویت تأیید شده:
-    اجرای خودکار /start
-  */
-  await executeCommand(
-    bot,
-    chatId,
-    "/start"
-  );
-}
-
-/* =========================
-   CALLBACK
-========================= */
-
-async function handleCallback(
-  bot,
-  callback
-) {
-  const data =
-    String(
-      callback.data || ""
-    );
-
-  if (
-    data !==
-    "check_join_start"
-  ) {
-    return;
-  }
-
-  const userId =
-    callback.from.id;
-
-  const chatId =
-    callback.message?.chat?.id;
-
-  if (!chatId) {
-    return;
-  }
-
-  try {
-    /*
-      دوباره عضویت واقعی بررسی می‌شود.
-    */
-    const result =
-      await checkAllMemberships(
-        bot,
-        userId
+    const botId =
+      String(
+        req.query.bot || ""
       );
 
-    if (!result.ok) {
-      await telegram(
-        bot.token,
-        "answerCallbackQuery",
-        {
-          callback_query_id:
-            callback.id,
-
-          text:
-            "❌ شما هنوز عضو کانال یا گروه نیستید.",
-
-          show_alert:
-            true
-        }
+    if (!botId) {
+      return res.send(
+        botPickerPage(
+          req,
+          "⚡ دستورات",
+          "/commands"
+        )
       );
-
-      return;
     }
 
-    /*
-      تأیید موفق
-    */
-    await telegram(
-      bot.token,
-      "answerCallbackQuery",
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    const commands =
+      db.commands[
+        bot.id
+      ] || {};
+
+    res.send(
+      page(
+        "دستورات",
+        `
+<div class="item-row">
+
+<h1>
+⚡ دستورات
+</h1>
+
+<a
+  class="btn"
+  href="/commands/add?bot=${encodeURIComponent(
+    bot.id
+  )}"
+>
+➕ افزودن دستور
+</a>
+
+</div>
+
+<div class="card">
+
+${
+  Object.keys(commands)
+    .length
+    ? Object.entries(
+        commands
+      )
+        .map(
+          ([command, item]) => `
+<div class="list-item">
+
+<div class="item-row">
+
+<div>
+
+<strong>
+/${esc(command)}
+</strong>
+
+<div class="muted">
+${esc(item.response)}
+</div>
+
+</div>
+
+<a
+  class="btn btn-danger"
+  href="/commands/delete?bot=${encodeURIComponent(
+    bot.id
+  )}&command=${encodeURIComponent(
+    command
+  )}"
+>
+حذف
+</a>
+
+</div>
+
+</div>
+`
+        )
+        .join("")
+    : `
+<div class="empty">
+هنوز دستوری وجود ندارد.
+</div>
+`
+}
+
+</div>
+`
+      )
+    );
+  }
+);
+
+/* =====================================================
+   ADD COMMAND
+===================================================== */
+
+app.get(
+  "/commands/add",
+  requireLogin,
+  (req, res) => {
+
+    const botId =
+      String(
+        req.query.bot || ""
+      );
+
+    if (!botId) {
+      return res.send(
+        botPickerPage(
+          req,
+          "➕ افزودن دستور",
+          "/commands/add"
+        )
+      );
+    }
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    res.send(
+      page(
+        "افزودن دستور",
+        `
+<h1>
+➕ افزودن دستور
+</h1>
+
+${
+  req.query.error
+    ? `
+<div class="alert alert-error">
+${esc(req.query.error)}
+</div>
+`
+    : ""
+}
+
+<div class="card">
+
+<form
+  method="POST"
+  action="/commands/add"
+>
+
+<input
+  type="hidden"
+  name="botId"
+  value="${esc(bot.id)}"
+>
+
+<div class="form-group">
+
+<label>
+نام دستور
+</label>
+
+<input
+  name="command"
+  placeholder="start"
+  required
+>
+
+</div>
+
+<div class="form-group">
+
+<label>
+پاسخ
+</label>
+
+<textarea
+  name="response"
+  required
+></textarea>
+
+</div>
+
+<button
+  class="btn"
+  type="submit"
+>
+💾 ذخیره
+</button>
+
+</form>
+
+</div>
+`
+      )
+    );
+  }
+);
+
+app.post(
+  "/commands/add",
+  requireLogin,
+  (req, res) => {
+
+    const botId =
+      String(
+        req.body.botId || ""
+      );
+
+    let command =
+      String(
+        req.body.command || ""
+      ).trim();
+
+    const response =
+      String(
+        req.body.response || ""
+      );
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    command =
+      command
+        .replace(/^\//, "")
+        .split("@")[0]
+        .replace(
+          /[^a-zA-Z0-9_]/g,
+          ""
+        );
+
+    if (
+      !command ||
+      !response
+    ) {
+      return res.redirect(
+        `/commands/add?bot=${encodeURIComponent(
+          bot.id
+        )}&error=` +
+          encodeURIComponent(
+            "نام و پاسخ را وارد کنید."
+          )
+      );
+    }
+
+    if (
+      !db.commands[
+        bot.id
+      ]
+    ) {
+      db.commands[
+        bot.id
+      ] = {};
+    }
+
+    db.commands[
+      bot.id
+    ][command] = {
+      response,
+      createdAt:
+        Date.now()
+    };
+
+    saveDB();
+
+    addActivity(
+      "command_add",
+      "دستور اضافه شد",
+      "/" + command,
       {
-        callback_query_id:
-          callback.id,
-
-        text:
-          "✅ عضویت شما تأیید شد.",
-
-        show_alert:
-          false
+        botId: bot.id
       }
     );
 
-    /*
-      حذف پیام عضویت
-    */
-    if (
-      callback.message
-        ?.message_id
-    ) {
-      await deleteTelegramMessage(
-        bot,
-        chatId,
-        callback.message
-          .message_id
+    res.redirect(
+      `/commands?bot=${encodeURIComponent(
+        bot.id
+      )}`
+    );
+  }
+);
+
+/* =====================================================
+   DELETE COMMAND
+===================================================== */
+
+app.get(
+  "/commands/delete",
+  requireLogin,
+  (req, res) => {
+
+    const botId =
+      String(
+        req.query.bot || ""
+      );
+
+    const command =
+      String(
+        req.query.command || ""
+      );
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res.redirect(
+        "/commands"
       );
     }
 
-    /*
-      اجرای خودکار /start
-    */
-    await executeCommand(
-      bot,
-      chatId,
-      "/start"
+    if (
+      db.commands[
+        bot.id
+      ]
+    ) {
+      delete db.commands[
+        bot.id
+      ][command];
+
+      saveDB();
+    }
+
+    addActivity(
+      "command_delete",
+      "دستور حذف شد",
+      "/" + command,
+      {
+        botId: bot.id
+      }
     );
 
-  } catch (error) {
-    console.error(
-      "Force Join Callback:",
-      error
+    res.redirect(
+      `/commands?bot=${encodeURIComponent(
+        bot.id
+      )}`
     );
-
-    try {
-      await telegram(
-        bot.token,
-        "answerCallbackQuery",
-        {
-          callback_query_id:
-            callback.id,
-
-          text:
-            "⚠️ خطا در بررسی عضویت.",
-
-          show_alert:
-            true
-        }
-      );
-    } catch {}
   }
+);
+
+/* =====================================================
+   USERS
+===================================================== */
+
+app.get(
+  "/users",
+  requireLogin,
+  (req, res) => {
+
+    const botId =
+      String(
+        req.query.bot || ""
+      );
+
+    if (!botId) {
+      return res.send(
+        botPickerPage(
+          req,
+          "👥 آمار کاربران",
+          "/users"
+        )
+      );
+    }
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    const users =
+      Object.values(
+        db.botUsers[
+          bot.id
+        ] || {}
+      );
+
+    res.send(
+      page(
+        "آمار کاربران",
+        `
+<h1>
+👥 کاربران
+</h1>
+
+<div class="card">
+
+<h2>
+${users.length}
+کاربر
+</h2>
+
+${
+  users.length
+    ? `
+<div style="overflow:auto">
+
+<table>
+
+<tr>
+<th>نام</th>
+<th>آیدی</th>
+<th>یوزرنیم</th>
+</tr>
+
+${users
+  .map(
+    user => `
+<tr>
+
+<td>
+${esc(
+  `${user.first_name || ""} ${
+    user.last_name || ""
+  }`
+)}
+</td>
+
+<td>
+${esc(user.id)}
+</td>
+
+<td>
+${
+  user.username
+    ? "@" +
+      esc(
+        user.username
+      )
+    : "-"
+}
+</td>
+
+</tr>
+`
+  )
+  .join("")}
+
+</table>
+
+</div>
+`
+    : `
+<div class="empty">
+هنوز کاربری ثبت نشده است.
+</div>
+`
 }
 
-/* =========================
-   UPDATE
-========================= */
+</div>
+`
+      )
+    );
+  }
+);
+
+/* =====================================================
+   BROADCAST
+===================================================== */
+
+app.get(
+  "/broadcast",
+  requireLogin,
+  (req, res) => {
+
+    const botId =
+      String(
+        req.query.bot || ""
+      );
+
+    if (!botId) {
+      return res.send(
+        botPickerPage(
+          req,
+          "📢 ارسال پیام به همه کاربران",
+          "/broadcast"
+        )
+      );
+    }
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    const count =
+      Object.keys(
+        db.botUsers[
+          bot.id
+        ] || {}
+      ).length;
+
+    res.send(
+      page(
+        "ارسال پیام",
+        `
+<h1>
+📢 ارسال پیام به همه کاربران
+</h1>
+
+<div class="card">
+
+<p>
+ربات:
+<b>${esc(bot.name)}</b>
+</p>
+
+<p>
+تعداد کاربران:
+<b>${count}</b>
+</p>
+
+${
+  req.query.result
+    ? `
+<div class="alert alert-success">
+${esc(req.query.result)}
+</div>
+`
+    : ""
+}
+
+${
+  req.query.error
+    ? `
+<div class="alert alert-error">
+${esc(req.query.error)}
+</div>
+`
+    : ""
+}
+
+<form
+  method="POST"
+  action="/broadcast"
+>
+
+<input
+  type="hidden"
+  name="botId"
+  value="${esc(bot.id)}"
+>
+
+<div class="form-group">
+
+<label>
+نوع پیام
+</label>
+
+<select
+  name="type"
+  id="type"
+  onchange="changeType()"
+>
+
+<option value="text">
+📝 متن
+</option>
+
+<option value="photo">
+🖼 عکس
+</option>
+
+<option value="video">
+🎬 ویدیو
+</option>
+
+</select>
+
+</div>
+
+<div class="form-group">
+
+<label>
+متن / کپشن
+</label>
+
+<textarea
+  name="text"
+></textarea>
+
+</div>
+
+<div
+  id="media"
+  class="form-group"
+  style="display:none"
+>
+
+<label>
+لینک فایل یا Telegram file_id
+</label>
+
+<input
+  name="media"
+>
+
+</div>
+
+<button
+  class="btn"
+  type="submit"
+>
+📢 ارسال به همه
+</button>
+
+</form>
+
+</div>
+
+<script>
+
+function changeType() {
+
+  const type =
+    document.getElementById(
+      "type"
+    ).value;
+
+  document.getElementById(
+    "media"
+  ).style.display =
+    type === "text"
+      ? "none"
+      : "block";
+}
+
+</script>
+`
+      )
+    );
+  }
+);
+
+app.post(
+  "/broadcast",
+  requireLogin,
+  async (req, res) => {
+
+    const botId =
+      String(
+        req.body.botId || ""
+      );
+
+    const type =
+      String(
+        req.body.type || "text"
+      );
+
+    const text =
+      String(
+        req.body.text || ""
+      );
+
+    const media =
+      String(
+        req.body.media || ""
+      ).trim();
+
+    const bot =
+      getBotForUser(
+        req,
+        botId
+      );
+
+    if (!bot) {
+      return res
+        .status(404)
+        .send(
+          "ربات پیدا نشد."
+        );
+    }
+
+    if (
+      type !== "text" &&
+      !media
+    ) {
+      return res.redirect(
+        `/broadcast?bot=${encodeURIComponent(
+          bot.id
+        )}&error=` +
+          encodeURIComponent(
+            "فایل را وارد کنید."
+          )
+      );
+    }
+
+    if (
+      type === "text" &&
+      !text
+    ) {
+      return res.redirect(
+        `/broadcast?bot=${encodeURIComponent(
+          bot.id
+        )}&error=` +
+          encodeURIComponent(
+            "متن را وارد کنید."
+          )
+      );
+    }
+
+    const users =
+      Object.values(
+        db.botUsers[
+          bot.id
+        ] || {}
+      );
+
+    let sent = 0;
+    let failed = 0;
+
+    for (
+      const user of users
+    ) {
+
+      try {
+
+        if (
+          type === "text"
+        ) {
+
+          await telegram(
+            bot.token,
+            "sendMessage",
+            {
+              chat_id:
+                user.id,
+              text
+            }
+          );
+
+        } else if (
+          type === "photo"
+        ) {
+
+          await telegram(
+            bot.token,
+            "sendPhoto",
+            {
+              chat_id:
+                user.id,
+              photo:
+                media,
+              caption:
+                text
+            }
+          );
+
+        } else {
+
+          await telegram(
+            bot.token,
+            "sendVideo",
+            {
+              chat_id:
+                user.id,
+              video:
+                media,
+              caption:
+                text
+            }
+          );
+
+        }
+
+        sent++;
+
+      } catch {
+
+        failed++;
+
+      }
+
+      await sleep(80);
+    }
+
+    addActivity(
+      "broadcast",
+      "ارسال همگانی",
+      `موفق: ${sent} | ناموفق: ${failed}`,
+      {
+        botId: bot.id
+      }
+    );
+
+    res.redirect(
+      `/broadcast?bot=${encodeURIComponent(
+        bot.id
+      )}&result=` +
+        encodeURIComponent(
+          `ارسال تمام شد | موفق: ${sent} | ناموفق: ${failed}`
+        )
+    );
+  }
+);
+
+/* =====================================================
+   SAVE TELEGRAM USER
+===================================================== */
 
 function saveBotUser(
   bot,
   telegramUser
 ) {
-  if (
-    !telegramUser ||
-    !telegramUser.id
-  ) {
+
+  if (!telegramUser?.id)
     return;
-  }
 
   if (
     !db.botUsers[
@@ -1136,12 +3744,10 @@ function saveBotUser(
       bot.id
     ][key];
 
-  const isNew =
-    !old;
-
   db.botUsers[
     bot.id
   ][key] = {
+
     id:
       telegramUser.id,
 
@@ -1170,27 +3776,194 @@ function saveBotUser(
   };
 
   saveDB();
-
-  if (isNew) {
-    addActivity(
-      "user",
-      `کاربر جدید ${telegramUser.id} وارد ربات شد.`,
-      bot.id
-    );
-  }
 }
+
+/* =====================================================
+   /START
+   FORCE MEMBERSHIP
+===================================================== */
+
+async function handleStart(
+  bot,
+  message
+) {
+
+  const userId =
+    message.from.id;
+
+  const chatId =
+    message.chat.id;
+
+  ensureForceJoinState(
+    bot
+  );
+
+  /*
+   * هیچ عضویت اجباری وجود ندارد.
+   */
+  if (
+    bot.forceJoins.length === 0
+  ) {
+
+    await executeCommand(
+      bot,
+      chatId,
+      "/start"
+    );
+
+    return;
+  }
+
+  /*
+   * بررسی عضویت.
+   */
+  const result =
+    await checkAllMemberships(
+      bot,
+      userId
+    );
+
+  /*
+   * اگر عضویت ناقص باشد،
+   * /start اجرا نمی‌شود.
+   */
+  if (!result.ok) {
+
+    await sendJoinMessage(
+      bot,
+      chatId,
+      result.missing
+    );
+
+    return;
+  }
+
+  /*
+   * عضویت کامل است.
+   */
+  await executeCommand(
+    bot,
+    chatId,
+    "/start"
+  );
+}
+
+/* =====================================================
+   CALLBACK
+===================================================== */
+
+async function handleCallback(
+  bot,
+  query
+) {
+
+  if (
+    query.data !==
+    "check_join_start"
+  ) {
+    return;
+  }
+
+  const userId =
+    query.from?.id;
+
+  const chatId =
+    query.message?.chat?.id;
+
+  if (!userId || !chatId)
+    return;
+
+  const result =
+    await checkAllMemberships(
+      bot,
+      userId
+    );
+
+  /*
+   * هنوز عضو نشده.
+   */
+  if (!result.ok) {
+
+    await telegram(
+      bot.token,
+      "answerCallbackQuery",
+      {
+        callback_query_id:
+          query.id,
+        text:
+          "❌ هنوز عضویت کامل نشده است.",
+        show_alert: true
+      }
+    );
+
+    return;
+  }
+
+  /*
+   * عضویت تأیید شد.
+   */
+  await telegram(
+    bot.token,
+    "answerCallbackQuery",
+    {
+      callback_query_id:
+        query.id,
+      text:
+        "✅ عضویت شما تأیید شد."
+    }
+  );
+
+  /*
+   * حذف پیام عضویت.
+   */
+  if (
+    query.message?.message_id
+  ) {
+
+    try {
+
+      await telegram(
+        bot.token,
+        "deleteMessage",
+        {
+          chat_id:
+            chatId,
+          message_id:
+            query.message
+              .message_id
+        }
+      );
+
+    } catch {}
+
+  }
+
+  /*
+   * اجرای خودکار /start
+   */
+  await executeCommand(
+    bot,
+    chatId,
+    "/start"
+  );
+}
+
+/* =====================================================
+   UPDATE HANDLER
+===================================================== */
 
 async function handleUpdate(
   bot,
   update
 ) {
+
   /*
-    Callback مربوط به
-    بررسی عضویت
-  */
+   * Callback اول.
+   */
   if (
     update.callback_query
   ) {
+
     await handleCallback(
       bot,
       update.callback_query
@@ -1202,15 +3975,11 @@ async function handleUpdate(
   const message =
     update.message;
 
-  if (!message) {
-    return;
-  }
-
-  if (!message.from) {
-    return;
-  }
-
-  if (!message.chat) {
+  if (
+    !message ||
+    !message.from ||
+    !message.chat
+  ) {
     return;
   }
 
@@ -1219,19 +3988,16 @@ async function handleUpdate(
     message.from
   );
 
-  const commandName =
+  /*
+   * فقط /start عضویت اجباری دارد.
+   */
+  if (
+    message.text &&
     getCommandNameFromText(
       message.text
-    );
-
-  /*
-    بسیار مهم:
-    عضویت اجباری فقط روی /start
-    اجرا می‌شود.
-  */
-  if (
-    commandName === "start"
+    ) === "start"
   ) {
+
     await handleStart(
       bot,
       message
@@ -1241,10 +4007,11 @@ async function handleUpdate(
   }
 
   /*
-    دستورات دیگر بدون
-    بررسی عضویت اجرا می‌شوند.
-  */
+   * سایر دستورات بدون
+   * عضویت اجباری اجرا می‌شوند.
+   */
   if (message.text) {
+
     await executeCommand(
       bot,
       message.chat.id,
@@ -1253,19 +4020,14 @@ async function handleUpdate(
   }
 }
 
-/* =========================
+/* =====================================================
    POLLING
-========================= */
+===================================================== */
 
 const pollingState =
   new Map();
 
-async function pollBot(
-  bot
-) {
-  if (!bot?.token) {
-    return;
-  }
+async function pollBot(bot) {
 
   if (
     pollingState.get(
@@ -1275,15 +4037,9 @@ async function pollBot(
     return;
   }
 
-  const old =
-    pollingState.get(
-      bot.id
-    );
-
   const state = {
     running: true,
-    offset:
-      old?.offset || 0
+    offset: 0
   };
 
   pollingState.set(
@@ -1291,58 +4047,44 @@ async function pollBot(
     state
   );
 
-  try {
-    await telegram(
-      bot.token,
-      "getMe"
-    );
-  } catch (error) {
-    console.error(
-      `Bot ${bot.id}:`,
-      error.message
-    );
+  console.log(
+    "Polling started:",
+    bot.username ||
+      bot.name
+  );
 
-    state.running =
-      false;
+  while (true) {
 
-    setTimeout(
-      () => pollBot(bot),
-      10000
-    );
-
-    return;
-  }
-
-  async function loop() {
-    if (!state.running) {
-      return;
-    }
-
-    const currentBot =
-      db.bots.find(
-        b =>
-          b.id ===
-          bot.id
+    const current =
+      pollingState.get(
+        bot.id
       );
 
-    if (!currentBot) {
-      state.running =
-        false;
+    if (
+      !current?.running
+    ) {
+      break;
+    }
 
-      return;
+    if (
+      !db.bots.some(
+        b =>
+          b.id === bot.id
+      )
+    ) {
+      break;
     }
 
     try {
+
       const updates =
         await telegram(
-          currentBot.token,
+          bot.token,
           "getUpdates",
           {
             offset:
               state.offset,
-
             timeout: 25,
-
             allowed_updates: [
               "message",
               "callback_query"
@@ -1353,59 +4095,56 @@ async function pollBot(
       for (
         const update of updates
       ) {
+
         state.offset =
-          update.update_id +
-          1;
+          update.update_id + 1;
 
         try {
+
           await handleUpdate(
-            currentBot,
+            bot,
             update
           );
-        } catch (error) {
+
+        } catch (err) {
+
           console.error(
-            "Update error:",
-            error
+            "UPDATE ERROR:",
+            err.message
           );
+
         }
       }
-    } catch (error) {
+
+    } catch (err) {
+
       console.error(
-        "Polling error:",
-        error.message
+        "POLLING ERROR:",
+        err.message
       );
 
-      await new Promise(
-        resolve =>
-          setTimeout(
-            resolve,
-            3000
-          )
-      );
+      await sleep(3000);
     }
-
-    setTimeout(
-      loop,
-      300
-    );
   }
 
-  loop();
+  pollingState.delete(
+    bot.id
+  );
 }
 
-function startAllBots() {
-  for (
-    const bot of db.bots
-  ) {
-    if (bot.token) {
-      pollBot(bot);
-    }
-  }
+function startBotPolling(
+  bot
+) {
+
+  pollBot(bot).catch(
+    console.error
+  );
 }
 
 function stopBotPolling(
   botId
 ) {
+
   const state =
     pollingState.get(
       botId
@@ -1414,3152 +4153,75 @@ function stopBotPolling(
   if (state) {
     state.running =
       false;
-
-    pollingState.delete(
-      botId
-    );
   }
-}
 
-/* =========================
-   UI
-========================= */
-
-function page(
-  req,
-  title,
-  content,
-  botId = ""
-) {
-  const loggedIn =
-    !!req.session.userId;
-
-  const botQuery =
+  pollingState.delete(
     botId
-      ? `?bot=${encodeURIComponent(
-          botId
-        )}`
-      : "";
-
-  const selectedMenu =
-    botId
-      ? `
-        <div class="menu-title">
-          ⚙️ مدیریت ربات
-        </div>
-
-        <a
-          class="menu-item"
-          href="/forcejoin${botQuery}">
-          🔐 عضویت اجباری
-        </a>
-
-        <a
-          class="menu-item"
-          href="/broadcast${botQuery}">
-          📢 ارسال پیام به همه کاربران
-        </a>
-
-        <a
-          class="menu-item"
-          href="/commands/add${botQuery}">
-          ➕ افزودن دستور
-        </a>
-
-        <a
-          class="menu-item"
-          href="/commands${botQuery}">
-          ⚡ دستورات
-        </a>
-
-        <a
-          class="menu-item"
-          href="/users${botQuery}">
-          👥 آمار کاربران
-        </a>
-      `
-      : `
-        <div class="menu-disabled">
-          🔐 عضویت اجباری
-        </div>
-
-        <div class="menu-disabled">
-          📢 ارسال پیام به همه کاربران
-        </div>
-
-        <div class="menu-disabled">
-          ➕ افزودن دستور
-        </div>
-
-        <div class="menu-disabled">
-          ⚡ دستورات
-        </div>
-
-        <div class="menu-disabled">
-          👥 آمار کاربران
-        </div>
-      `;
-
-  return `
-<!DOCTYPE html>
-
-<html
-  lang="fa"
-  dir="rtl"
->
-
-<head>
-
-<meta charset="UTF-8">
-
-<meta
-  name="viewport"
-  content="width=device-width,initial-scale=1.0"
->
-
-<title>
-${escapeHtml(title)}
-</title>
-
-<style>
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  min-height: 100vh;
-
-  font-family:
-    Tahoma,
-    Arial,
-    sans-serif;
-
-  color: #172033;
-
-  background:
-    radial-gradient(
-      circle at 10% 20%,
-      rgba(255,0,128,.35),
-      transparent 30%
-    ),
-    radial-gradient(
-      circle at 90% 10%,
-      rgba(0,200,255,.35),
-      transparent 30%
-    ),
-    radial-gradient(
-      circle at 50% 90%,
-      rgba(100,50,255,.35),
-      transparent 35%
-    ),
-    linear-gradient(
-      135deg,
-      #6d28d9,
-      #2563eb,
-      #0891b2,
-      #db2777
-    );
-
-  background-attachment: fixed;
-}
-
-body.dark {
-  color: #f8fafc;
-
-  background:
-    radial-gradient(
-      circle at 20% 20%,
-      rgba(99,102,241,.25),
-      transparent 30%
-    ),
-    radial-gradient(
-      circle at 80% 80%,
-      rgba(236,72,153,.2),
-      transparent 30%
-    ),
-    #050816;
-}
-
-a {
-  text-decoration: none;
-  color: inherit;
-}
-
-.topbar {
-  position: sticky;
-  top: 0;
-  z-index: 1000;
-
-  height: 70px;
-
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-
-  padding: 0 18px;
-
-  color: white;
-
-  background:
-    rgba(15,23,42,.88);
-
-  backdrop-filter:
-    blur(15px);
-}
-
-.brand {
-  font-size: 17px;
-  font-weight: bold;
-}
-
-.icon-btn {
-  width: 42px;
-  height: 42px;
-
-  border: 0;
-  border-radius: 12px;
-
-  color: white;
-
-  background:
-    rgba(255,255,255,.12);
-
-  cursor: pointer;
-
-  font-size: 20px;
-}
-
-.left-buttons {
-  display: flex;
-  gap: 8px;
-}
-
-.side-menu {
-  position: fixed;
-
-  top: 0;
-  right: -330px;
-
-  width: 310px;
-  max-width: 88vw;
-
-  height: 100vh;
-
-  z-index: 3000;
-
-  padding: 85px 15px 20px;
-
-  overflow-y: auto;
-
-  color: white;
-
-  background:
-    linear-gradient(
-      160deg,
-      #111827,
-      #1e1b4b,
-      #312e81
-    );
-
-  transition:
-    right .25s ease;
-
-  box-shadow:
-    -15px 0 40px
-    rgba(0,0,0,.35);
-}
-
-.side-menu.open {
-  right: 0;
-}
-
-.overlay {
-  position: fixed;
-
-  inset: 0;
-
-  z-index: 2500;
-
-  display: none;
-
-  background:
-    rgba(0,0,0,.55);
-}
-
-.overlay.show {
-  display: block;
-}
-
-.menu-title {
-  padding: 15px;
-  margin-bottom: 9px;
-
-  border-radius: 14px;
-
-  background:
-    linear-gradient(
-      135deg,
-      #7c3aed,
-      #db2777
-    );
-
-  font-weight: bold;
-}
-
-.menu-item,
-.menu-disabled {
-  display: block;
-
-  padding: 14px;
-
-  margin: 7px 0;
-
-  border-radius: 13px;
-
-  background:
-    rgba(255,255,255,.08);
-}
-
-.menu-item:hover {
-  background:
-    rgba(255,255,255,.18);
-}
-
-.menu-disabled {
-  opacity: .45;
-}
-
-.container {
-  width:
-    min(1150px, 94%);
-
-  margin:
-    28px auto 60px;
-}
-
-.card {
-  padding: 23px;
-
-  margin-bottom: 20px;
-
-  border-radius: 22px;
-
-  background:
-    rgba(255,255,255,.88);
-
-  box-shadow:
-    0 15px 45px
-    rgba(15,23,42,.16);
-
-  backdrop-filter:
-    blur(15px);
-}
-
-body.dark .card {
-  background:
-    rgba(17,24,39,.9);
-}
-
-.hero {
-  color: white;
-
-  background:
-    linear-gradient(
-      135deg,
-      rgba(124,58,237,.95),
-      rgba(219,39,119,.95)
-    );
-}
-
-.grid {
-  display: grid;
-
-  grid-template-columns:
-    repeat(
-      auto-fit,
-      minmax(210px,1fr)
-    );
-
-  gap: 16px;
-}
-
-.stat {
-  padding: 22px;
-
-  border-radius: 18px;
-
-  color: white;
-
-  background:
-    linear-gradient(
-      135deg,
-      #2563eb,
-      #7c3aed
-    );
-
-  box-shadow:
-    0 12px 30px
-    rgba(37,99,235,.22);
-}
-
-.stat:nth-child(2) {
-  background:
-    linear-gradient(
-      135deg,
-      #db2777,
-      #9333ea
-    );
-}
-
-.stat:nth-child(3) {
-  background:
-    linear-gradient(
-      135deg,
-      #059669,
-      #0891b2
-    );
-}
-
-.stat:nth-child(4) {
-  background:
-    linear-gradient(
-      135deg,
-      #ea580c,
-      #eab308
-    );
-}
-
-.stat strong {
-  display: block;
-
-  margin-top: 9px;
-
-  font-size: 34px;
-}
-
-input,
-textarea,
-select {
-  width: 100%;
-
-  padding: 13px 15px;
-
-  margin:
-    7px 0 15px;
-
-  border:
-    1px solid #d8deea;
-
-  border-radius: 13px;
-
-  font-size: 15px;
-
-  background: white;
-}
-
-textarea {
-  min-height: 150px;
-  resize: vertical;
-}
-
-button,
-.btn {
-  display: inline-flex;
-
-  align-items: center;
-  justify-content: center;
-
-  gap: 7px;
-
-  padding:
-    12px 17px;
-
-  border: 0;
-
-  border-radius: 12px;
-
-  color: white;
-
-  cursor: pointer;
-
-  background:
-    linear-gradient(
-      135deg,
-      #2563eb,
-      #7c3aed
-    );
-}
-
-.btn-green {
-  background:
-    linear-gradient(
-      135deg,
-      #059669,
-      #10b981
-    );
-}
-
-.btn-danger {
-  background:
-    linear-gradient(
-      135deg,
-      #dc2626,
-      #f43f5e
-    );
-}
-
-.btn-orange {
-  background:
-    linear-gradient(
-      135deg,
-      #ea580c,
-      #f59e0b
-    );
-}
-
-.btn-gray {
-  background:
-    linear-gradient(
-      135deg,
-      #475569,
-      #334155
-    );
-}
-
-.item {
-  padding: 17px;
-
-  margin-bottom: 12px;
-
-  border-radius: 15px;
-
-  background:
-    rgba(100,116,139,.08);
-}
-
-.alert {
-  padding: 15px;
-
-  margin-bottom: 15px;
-
-  border-radius: 13px;
-
-  color: #713f12;
-
-  background: #fff7d6;
-}
-
-.alert.error {
-  color: #991b1b;
-  background: #fee2e2;
-}
-
-.alert.success {
-  color: #166534;
-  background: #dcfce7;
-}
-
-.activity {
-  display: flex;
-  gap: 12px;
-
-  padding: 14px 0;
-
-  border-bottom:
-    1px solid
-    rgba(100,116,139,.15);
-}
-
-.activity-icon {
-  width: 42px;
-  height: 42px;
-
-  flex-shrink: 0;
-
-  display: flex;
-
-  align-items: center;
-  justify-content: center;
-
-  border-radius: 12px;
-
-  color: white;
-
-  background:
-    linear-gradient(
-      135deg,
-      #6366f1,
-      #ec4899
-    );
-}
-
-.row {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.badge {
-  display: inline-block;
-
-  padding: 6px 10px;
-
-  border-radius: 999px;
-
-  color: #3730a3;
-
-  background: #e0e7ff;
-}
-
-@media(max-width:600px) {
-
-  .brand {
-    font-size: 13px;
-  }
-
-  .container {
-    width: 92%;
-  }
-
-  .card {
-    padding: 18px;
-  }
-
-}
-
-</style>
-
-</head>
-
-<body>
-
-<header class="topbar">
-
-  <button
-    class="icon-btn"
-    onclick="openMenu()">
-    ☰
-  </button>
-
-  <div class="brand">
-    🤖 ربات ساز کانفیگ ساز رایگان
-  </div>
-
-  <div class="left-buttons">
-
-    <button
-      class="icon-btn"
-      onclick="toggleDark()">
-      🌓
-    </button>
-
-    <button
-      class="icon-btn"
-      onclick="location.reload()">
-      ↻
-    </button>
-
-  </div>
-
-</header>
-
-<div
-  id="overlay"
-  class="overlay"
-  onclick="closeMenu()">
-</div>
-
-<aside
-  id="sideMenu"
-  class="side-menu">
-
-  <div class="menu-title">
-    🤖 منوی مدیریت
-  </div>
-
-  <a
-    class="menu-item"
-    href="/dashboard">
-    📊 داشبورد
-  </a>
-
-  <a
-    class="menu-item"
-    href="/bots">
-    🤖 ربات ها
-  </a>
-
-  <a
-    class="menu-item"
-    href="/bots/add">
-    ➕ افزودن ربات
-  </a>
-
-  ${selectedMenu}
-
-  <div
-    style="
-      height:1px;
-      background:rgba(255,255,255,.12);
-      margin:15px 0;
-    ">
-  </div>
-
-  <a
-    class="menu-item"
-    href="/creator/login">
-    👑 ورود سازنده
-  </a>
-
-  ${
-    loggedIn
-      ? `
-        <a
-          class="menu-item"
-          href="/logout">
-          🚪 خروج
-        </a>
-      `
-      : ""
-  }
-
-</aside>
-
-<div class="container">
-
-${content}
-
-</div>
-
-<script>
-
-function openMenu() {
-  document
-    .getElementById("sideMenu")
-    .classList.add("open");
-
-  document
-    .getElementById("overlay")
-    .classList.add("show");
-}
-
-function closeMenu() {
-  document
-    .getElementById("sideMenu")
-    .classList.remove("open");
-
-  document
-    .getElementById("overlay")
-    .classList.remove("show");
-}
-
-function toggleDark() {
-  document.body.classList.toggle(
-    "dark"
-  );
-
-  localStorage.setItem(
-    "novaDark",
-    document.body.classList.contains(
-      "dark"
-    )
-      ? "1"
-      : "0"
   );
 }
 
-if (
-  localStorage.getItem(
-    "novaDark"
-  ) === "1"
-) {
-  document.body.classList.add(
-    "dark"
-  );
-}
-
-</script>
-
-</body>
-
-</html>
-`;
-}
-
-/* =========================
-   HOME
-========================= */
-
-app.get(
-  "/",
-  (req, res) => {
-    if (
-      req.session.userId
-    ) {
-      return res.redirect(
-        "/dashboard"
-      );
-    }
-
-    res.send(
-      page(
-        req,
-        "ربات ساز",
-        `
-        <div class="card hero">
-
-          <h1>
-            🤖 ربات ساز کانفیگ ساز رایگان
-          </h1>
-
-          <p>
-            ساخت و مدیریت ربات تلگرام
-          </p>
-
-          <div class="row">
-
-            <a
-              class="btn"
-              href="/login">
-              🔐 ورود
-            </a>
-
-            <a
-              class="btn btn-green"
-              href="/register">
-              📝 ثبت نام
-            </a>
-
-            <a
-              class="btn btn-orange"
-              href="/creator/login">
-              👑 ورود سازنده
-            </a>
-
-          </div>
-
-        </div>
-        `
-      )
-    );
-  }
-);
-
-/* =========================
-   REGISTER
-========================= */
-
-app.get(
-  "/register",
-  (req, res) => {
-    res.send(
-      page(
-        req,
-        "ثبت نام",
-        `
-        <div class="card">
-
-          <h1>
-            📝 ثبت نام
-          </h1>
-
-          <form
-            method="post"
-            action="/register">
-
-            <label>
-              نام کاربری
-            </label>
-
-            <input
-              name="username"
-              required>
-
-            <label>
-              رمز عبور
-            </label>
-
-            <input
-              name="password"
-              type="password"
-              required>
-
-            <button>
-              ثبت نام
-            </button>
-
-          </form>
-
-          <br>
-
-          <a
-            class="btn btn-gray"
-            href="/login">
-            ورود
-          </a>
-
-        </div>
-        `
-      )
-    );
-  }
-);
-
-app.post(
-  "/register",
-  (req, res) => {
-    const username =
-      String(
-        req.body.username ||
-          ""
-      ).trim();
-
-    const password =
-      String(
-        req.body.password ||
-          ""
-      );
-
-    if (
-      !username ||
-      !password
-    ) {
-      return res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              نام کاربری و رمز عبور الزامی است.
-            </div>
-
-            <a
-              class="btn"
-              href="/register">
-              بازگشت
-            </a>
-
-          </div>
-          `
-        )
-      );
-    }
-
-    const exists =
-      db.users.some(
-        user =>
-          user.username.toLowerCase() ===
-          username.toLowerCase()
-      );
-
-    if (exists) {
-      return res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              این نام کاربری قبلاً وجود دارد.
-            </div>
-
-            <a
-              class="btn"
-              href="/register">
-              بازگشت
-            </a>
-
-          </div>
-          `
-        )
-      );
-    }
-
-    const user = {
-      id: makeId(),
-      username,
-      password:
-        hashPassword(
-          password
-        ),
-      createdAt:
-        Date.now()
-    };
-
-    db.users.push(user);
-
-    saveDB();
-
-    req.session.userId =
-      user.id;
-
-    res.redirect(
-      "/dashboard"
-    );
-  }
-);
-
-/* =========================
-   LOGIN
-========================= */
-
-app.get(
-  "/login",
-  (req, res) => {
-    res.send(
-      page(
-        req,
-        "ورود",
-        `
-        <div class="card">
-
-          <h1>
-            🔐 ورود
-          </h1>
-
-          <form
-            method="post"
-            action="/login">
-
-            <label>
-              نام کاربری
-            </label>
-
-            <input
-              name="username"
-              required>
-
-            <label>
-              رمز عبور
-            </label>
-
-            <input
-              name="password"
-              type="password"
-              required>
-
-            <button>
-              ورود
-            </button>
-
-          </form>
-
-          <br>
-
-          <a
-            class="btn btn-green"
-            href="/register">
-            ثبت نام
-          </a>
-
-        </div>
-        `
-      )
-    );
-  }
-);
-
-app.post(
-  "/login",
-  (req, res) => {
-    const username =
-      String(
-        req.body.username ||
-          ""
-      ).trim();
-
-    const password =
-      String(
-        req.body.password ||
-          ""
-      );
-
-    const user =
-      db.users.find(
-        item =>
-          item.username.toLowerCase() ===
-            username.toLowerCase() &&
-          item.password ===
-            hashPassword(
-              password
-            )
-      );
-
-    if (!user) {
-      return res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              نام کاربری یا رمز عبور اشتباه است.
-            </div>
-
-            <a
-              class="btn"
-              href="/login">
-              بازگشت
-            </a>
-
-          </div>
-          `
-        )
-      );
-    }
-
-    req.session.userId =
-      user.id;
-
-    res.redirect(
-      "/dashboard"
-    );
-  }
-);
-
-app.get(
-  "/logout",
-  (req, res) => {
-    req.session.destroy(
-      () => {
-        res.redirect("/");
-      }
-    );
-  }
-);
-
-/* =========================
-   DASHBOARD
-========================= */
-
-app.get(
-  "/dashboard",
-  requireLogin,
-  (req, res) => {
-    const bots =
-      db.bots.filter(
-        bot =>
-          String(
-            bot.ownerId
-          ) ===
-          String(
-            req.session.userId
-          )
-      );
-
-    let totalUsers = 0;
-
-    for (
-      const bot of bots
-    ) {
-      totalUsers +=
-        Object.keys(
-          db.botUsers[
-            bot.id
-          ] || {}
-        ).length;
-    }
-
-    const activities =
-      db.activity
-        .filter(item => {
-          if (!item.botId) {
-            return true;
-          }
-
-          return bots.some(
-            bot =>
-              bot.id ===
-              item.botId
-          );
-        })
-        .slice(0, 15);
-
-    let activityHtml =
-      "";
-
-    for (
-      const item of activities
-    ) {
-      let icon = "📌";
-
-      if (
-        item.type === "user"
-      ) {
-        icon = "👤";
-      }
-
-      if (
-        item.type === "command"
-      ) {
-        icon = "⚡";
-      }
-
-      if (
-        item.type === "join"
-      ) {
-        icon = "🔐";
-      }
-
-      if (
-        item.type === "broadcast"
-      ) {
-        icon = "📢";
-      }
-
-      activityHtml += `
-        <div class="activity">
-
-          <div class="activity-icon">
-            ${icon}
-          </div>
-
-          <div>
-
-            <strong>
-              ${escapeHtml(
-                item.text
-              )}
-            </strong>
-
-            <br>
-
-            <small>
-              ${new Date(
-                item.createdAt
-              ).toLocaleString(
-                "fa-IR"
-              )}
-            </small>
-
-          </div>
-
-        </div>
-      `;
-    }
-
-    const commandCount =
-      bots.reduce(
-        (sum, bot) =>
-          sum +
-          Object.keys(
-            db.commands[
-              bot.id
-            ] || {}
-          ).length,
-        0
-      );
-
-    const forceJoinCount =
-      bots.reduce(
-        (sum, bot) =>
-          sum +
-          (
-            bot.forceJoins
-              ?.length || 0
-          ),
-        0
-      );
-
-    res.send(
-      page(
-        req,
-        "داشبورد",
-        `
-        <div class="card hero">
-
-          <h1>
-            📊 داشبورد
-          </h1>
-
-          <p>
-            مدیریت کامل ربات‌های شما
-          </p>
-
-        </div>
-
-        <div class="grid">
-
-          <div class="stat">
-            🤖 ربات‌ها
-            <strong>
-              ${bots.length}
-            </strong>
-          </div>
-
-          <div class="stat">
-            👥 کاربران
-            <strong>
-              ${totalUsers}
-            </strong>
-          </div>
-
-          <div class="stat">
-            ⚡ دستورات
-            <strong>
-              ${commandCount}
-            </strong>
-          </div>
-
-          <div class="stat">
-            🔐 عضویت اجباری
-            <strong>
-              ${forceJoinCount}
-            </strong>
-          </div>
-
-        </div>
-
-        <div class="card">
-
-          <h2>
-            🎬 فعالیت‌های اخیر
-          </h2>
-
-          ${
-            activityHtml ||
-            "<p>هنوز فعالیتی ثبت نشده است.</p>"
-          }
-
-        </div>
-
-        <div class="card">
-
-          <div class="row">
-
-            <a
-              class="btn btn-green"
-              href="/bots/add">
-              ➕ افزودن ربات
-            </a>
-
-            <a
-              class="btn"
-              href="/bots">
-              🤖 ربات‌ها
-            </a>
-
-            <button
-              class="btn btn-gray"
-              onclick="location.reload()">
-              ↻ بروزرسانی
-            </button>
-
-          </div>
-
-        </div>
-        `
-      )
-    );
-  }
-);
-
-/* =========================
-   BOTS
-========================= */
-
-app.get(
-  "/bots",
-  requireLogin,
-  (req, res) => {
-    const bots =
-      db.bots.filter(
-        bot =>
-          String(
-            bot.ownerId
-          ) ===
-          String(
-            req.session.userId
-          )
-      );
-
-    let html = `
-      <div class="card hero">
-
-        <h1>
-          🤖 ربات‌ها
-        </h1>
-
-        <a
-          class="btn btn-green"
-          href="/bots/add">
-          ➕ افزودن ربات
-        </a>
-
-      </div>
-    `;
-
-    if (
-      bots.length ===
-      0
-    ) {
-      html += `
-        <div class="card">
-
-          <p>
-            هنوز رباتی اضافه نکرده‌اید.
-          </p>
-
-          <a
-            class="btn btn-green"
-            href="/bots/add">
-            ➕ افزودن ربات
-          </a>
-
-        </div>
-      `;
-    }
-
-    for (
-      const bot of bots
-    ) {
-      const users =
-        Object.keys(
-          db.botUsers[
-            bot.id
-          ] || {}
-        ).length;
-
-      html += `
-        <div class="card">
-
-          <h2>
-            🤖 ${escapeHtml(
-              bot.name
-            )}
-          </h2>
-
-          <p>
-            @${
-              escapeHtml(
-                bot.username ||
-                  ""
-              )
-            }
-          </p>
-
-          <div class="grid">
-
-            <div class="stat">
-              👥 کاربران
-              <strong>
-                ${users}
-              </strong>
-            </div>
-
-            <div class="stat">
-              ⚡ دستورات
-              <strong>
-                ${
-                  Object.keys(
-                    db.commands[
-                      bot.id
-                    ] || {}
-                  ).length
-                }
-              </strong>
-            </div>
-
-            <div class="stat">
-              🔐 عضویت
-              <strong>
-                ${
-                  bot.forceJoins
-                    ?.length || 0
-                }
-              </strong>
-            </div>
-
-          </div>
-
-          <br>
-
-          <div class="row">
-
-            <a
-              class="btn"
-              href="/bots/${bot.id}">
-              ⚙️ مدیریت
-            </a>
-
-            <a
-              class="btn btn-green"
-              href="/forcejoin?bot=${bot.id}">
-              🔐 عضویت اجباری
-            </a>
-
-            <a
-              class="btn btn-orange"
-              href="/broadcast?bot=${bot.id}">
-              📢 ارسال پیام
-            </a>
-
-            <a
-              class="btn btn-danger"
-              href="/bots/delete/${bot.id}"
-              onclick="return confirm('آیا از حذف این ربات مطمئن هستید؟')">
-              🗑 حذف
-            </a>
-
-          </div>
-
-        </div>
-      `;
-    }
-
-    res.send(
-      page(
-        req,
-        "ربات‌ها",
-        html
-      )
-    );
-  }
-);
-
-/* =========================
-   ADD BOT
-========================= */
-
-app.get(
-  "/bots/add",
-  requireLogin,
-  (req, res) => {
-    res.send(
-      page(
-        req,
-        "افزودن ربات",
-        `
-        <div class="card hero">
-
-          <h1>
-            ➕ افزودن ربات
-          </h1>
-
-          <p>
-            توکن را از BotFather دریافت کنید.
-          </p>
-
-        </div>
-
-        <div class="card">
-
-          <form
-            method="post"
-            action="/bots/add">
-
-            <label>
-              نام ربات
-            </label>
-
-            <input
-              name="name"
-              placeholder="Nova Bot"
-              required>
-
-            <label>
-              توکن ربات
-            </label>
-
-            <input
-              name="token"
-              placeholder="123456789:ABC..."
-              required>
-
-            <button>
-              ➕ افزودن ربات
-            </button>
-
-          </form>
-
-        </div>
-        `
-      )
-    );
-  }
-);
-
-app.post(
-  "/bots/add",
-  requireLogin,
-  async (req, res) => {
-    const name =
-      String(
-        req.body.name ||
-          ""
-      ).trim();
-
-    const token =
-      String(
-        req.body.token ||
-          ""
-      ).trim();
-
-    if (
-      !name ||
-      !token
-    ) {
-      return res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              نام و توکن الزامی است.
-            </div>
-
-          </div>
-          `
-        )
-      );
-    }
-
-    try {
-      const me =
-        await telegram(
-          token,
-          "getMe"
-        );
-
-      const bot = {
-        id: makeId(),
-
-        ownerId:
-          req.session.userId,
-
-        name,
-
-        token,
-
-        telegramId:
-          me.id,
-
-        username:
-          me.username ||
-          "",
-
-        firstName:
-          me.first_name ||
-          "",
-
-        forceJoins: [],
-
-        forceJoinVerified: {},
-
-        createdAt:
-          Date.now()
-      };
-
-      db.bots.push(
-        bot
-      );
-
-      db.botUsers[
-        bot.id
-      ] = {};
-
-      db.commands[
-        bot.id
-      ] = {};
-
-      saveDB();
-
-      addActivity(
-        "bot",
-        `ربات ${name} اضافه شد.`,
-        bot.id
-      );
-
-      pollBot(bot);
-
-      res.redirect(
-        `/bots/${bot.id}`
-      );
-
-    } catch (error) {
-      res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-
-              ❌ توکن ربات معتبر نیست.
-
-              <br><br>
-
-              ${escapeHtml(
-                error.message
-              )}
-
-            </div>
-
-            <a
-              class="btn"
-              href="/bots/add">
-              بازگشت
-            </a>
-
-          </div>
-          `
-        )
-      );
-    }
-  }
-);
-
-/* =========================
-   BOT MANAGEMENT
-========================= */
-
-app.get(
-  "/bots/:id",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      db.bots.find(
-        item =>
-          item.id ===
-            req.params.id &&
-          String(
-            item.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
-      );
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    const users =
-      Object.keys(
-        db.botUsers[
-          bot.id
-        ] || {}
-      ).length;
-
-    const commands =
-      Object.keys(
-        db.commands[
-          bot.id
-        ] || {}
-      ).length;
-
-    const joins =
-      bot.forceJoins
-        ?.length || 0;
-
-    res.send(
-      page(
-        req,
-        bot.name,
-        `
-        <div class="card hero">
-
-          <h1>
-            🤖 ${escapeHtml(
-              bot.name
-            )}
-          </h1>
-
-          <p>
-            @${escapeHtml(
-              bot.username
-            )}
-          </p>
-
-        </div>
-
-        <div class="grid">
-
-          <div class="stat">
-            👥 کاربران
-            <strong>
-              ${users}
-            </strong>
-          </div>
-
-          <div class="stat">
-            ⚡ دستورات
-            <strong>
-              ${commands}
-            </strong>
-          </div>
-
-          <div class="stat">
-            🔐 عضویت
-            <strong>
-              ${joins}
-            </strong>
-          </div>
-
-        </div>
-
-        <div class="card">
-
-          <h2>
-            ⚙️ مدیریت
-          </h2>
-
-          <div class="row">
-
-            <a
-              class="btn btn-green"
-              href="/forcejoin?bot=${bot.id}">
-              🔐 عضویت اجباری
-            </a>
-
-            <a
-              class="btn btn-orange"
-              href="/broadcast?bot=${bot.id}">
-              📢 ارسال پیام به همه کاربران
-            </a>
-
-            <a
-              class="btn"
-              href="/commands/add?bot=${bot.id}">
-              ➕ افزودن دستور
-            </a>
-
-            <a
-              class="btn"
-              href="/commands?bot=${bot.id}">
-              ⚡ دستورات
-            </a>
-
-            <a
-              class="btn"
-              href="/users?bot=${bot.id}">
-              👥 آمار کاربران
-            </a>
-
-          </div>
-
-        </div>
-        `,
-        bot.id
-      )
-    );
-  }
-);
-
-/* =========================
-   DELETE BOT
-========================= */
-
-app.get(
-  "/bots/delete/:id",
-  requireLogin,
-  (req, res) => {
-    const index =
-      db.bots.findIndex(
-        bot =>
-          bot.id ===
-            req.params.id &&
-          String(
-            bot.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
-      );
-
-    if (index === -1) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    const bot =
-      db.bots[index];
-
-    stopBotPolling(
-      bot.id
-    );
-
-    db.bots.splice(
-      index,
-      1
-    );
-
-    delete db.botUsers[
-      bot.id
-    ];
-
-    delete db.commands[
-      bot.id
-    ];
-
-    saveDB();
-
-    addActivity(
-      "bot",
-      `ربات ${bot.name} حذف شد.`
-    );
-
-    res.redirect(
-      "/bots"
-    );
-  }
-);
-
-/* =========================
-   FORCE JOIN PAGE
-========================= */
-
-app.get(
-  "/forcejoin",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      findBot(req);
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    ensureForceJoinState(
-      bot
-    );
-
-    let list = "";
-
-    for (
-      let i = 0;
-      i <
-      bot.forceJoins.length;
-      i++
-    ) {
-      const join =
-        bot.forceJoins[i];
-
-      list += `
-        <div class="item">
-
-          <h3>
-            📢 ${escapeHtml(
-              join.title ||
-                join.username
-            )}
-          </h3>
-
-          <p>
-            ${escapeHtml(
-              join.username
-            )}
-          </p>
-
-          <span class="badge">
-            ${escapeHtml(
-              join.type ||
-                "channel"
-            )}
-          </span>
-
-          <br><br>
-
-          <a
-            class="btn btn-danger"
-            href="/forcejoin/delete?bot=${bot.id}&index=${i}"
-            onclick="return confirm('این مورد حذف شود؟')">
-            🗑 حذف
-          </a>
-
-        </div>
-      `;
-    }
-
-    res.send(
-      page(
-        req,
-        "عضویت اجباری",
-        `
-        <div class="card hero">
-
-          <h1>
-            🔐 عضویت اجباری
-          </h1>
-
-          <p>
-            فقط هنگام اجرای /start بررسی می‌شود.
-          </p>
-
-        </div>
-
-        <div class="card">
-
-          <div class="alert">
-
-            ⚠️ ربات باید در کانال یا گروه
-            ادمین باشد.
-
-            <br><br>
-
-            مثال:
-            https://t.me/example
-
-          </div>
-
-          <form
-            method="post"
-            action="/forcejoin/add">
-
-            <input
-              type="hidden"
-              name="bot"
-              value="${escapeHtml(
-                bot.id
-              )}">
-
-            <label>
-              لینک کانال یا گروه
-            </label>
-
-            <input
-              name="link"
-              placeholder="https://t.me/example"
-              required>
-
-            <button>
-              ➕ افزودن
-            </button>
-
-          </form>
-
-        </div>
-
-        <div class="card">
-
-          <h2>
-            کانال‌ها و گروه‌های فعال
-          </h2>
-
-          ${
-            list ||
-            "<p>عضویت اجباری فعال نیست.</p>"
-          }
-
-        </div>
-        `,
-        bot.id
-      )
-    );
-  }
-);
-
-/* =========================
-   ADD FORCE JOIN
-========================= */
-
-app.post(
-  "/forcejoin/add",
-  requireLogin,
-  async (req, res) => {
-    const botId =
-      String(
-        req.body.bot ||
-          ""
-      );
-
-    const link =
-      String(
-        req.body.link ||
-          ""
-      ).trim();
-
-    const bot =
-      db.bots.find(
-        item =>
-          item.id ===
-            botId &&
-          String(
-            item.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
-      );
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    ensureForceJoinState(
-      bot
-    );
-
-    if (
-      bot.forceJoins.length >=
-      5
-    ) {
-      return res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              حداکثر ۵ مورد قابل اضافه کردن است.
-            </div>
-
-          </div>
-          `,
-          bot.id
-        )
-      );
-    }
-
-    try {
-      const parsed =
-        parsePublicTelegramLink(
-          link
-        );
-
-      const chat =
-        await telegram(
-          bot.token,
-          "getChat",
-          {
-            chat_id:
-              parsed.username
-          }
-        );
-
-      if (
-        ![
-          "channel",
-          "supergroup",
-          "group"
-        ].includes(
-          chat.type
-        )
-      ) {
-        throw new Error(
-          "لینک باید مربوط به کانال یا گروه باشد."
-        );
-      }
-
-      const isAdmin =
-        await checkBotAdminInChat(
-          bot,
-          parsed.username
-        );
-
-      if (!isAdmin) {
-        throw new Error(
-          "ربات در این کانال یا گروه ادمین نیست."
-        );
-      }
-
-      const exists =
-        bot.forceJoins.some(
-          join =>
-            String(
-              join.username
-            ).toLowerCase() ===
-            String(
-              parsed.username
-            ).toLowerCase()
-        );
-
-      if (exists) {
-        throw new Error(
-          "این کانال یا گروه قبلاً اضافه شده است."
-        );
-      }
-
-      bot.forceJoins.push({
-        id: makeId(),
-
-        username:
-          parsed.username,
-
-        link:
-          parsed.link,
-
-        title:
-          chat.title ||
-          parsed.username,
-
-        type:
-          chat.type,
-
-        addedAt:
-          Date.now()
-      });
-
-      saveDB();
-
-      addActivity(
-        "join",
-        `عضویت اجباری ${chat.title || parsed.username} اضافه شد.`,
-        bot.id
-      );
-
-      res.redirect(
-        `/forcejoin?bot=${bot.id}`
-      );
-
-    } catch (error) {
-      res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              ${escapeHtml(
-                error.message
-              )}
-            </div>
-
-            <a
-              class="btn"
-              href="/forcejoin?bot=${bot.id}">
-              بازگشت
-            </a>
-
-          </div>
-          `,
-          bot.id
-        )
-      );
-    }
-  }
-);
-
-/* =========================
-   DELETE FORCE JOIN
-========================= */
-
-app.get(
-  "/forcejoin/delete",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      db.bots.find(
-        item =>
-          item.id ===
-            String(
-              req.query.bot ||
-                ""
-            ) &&
-          String(
-            item.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
-      );
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    ensureForceJoinState(
-      bot
-    );
-
-    const index =
-      Number(
-        req.query.index
-      );
-
-    if (
-      !Number.isInteger(
-        index
-      ) ||
-      index < 0 ||
-      index >=
-        bot.forceJoins.length
-    ) {
-      return res.status(
-        400
-      ).send(
-        "Invalid index"
-      );
-    }
-
-    bot.forceJoins.splice(
-      index,
-      1
-    );
-
-    saveDB();
-
-    res.redirect(
-      `/forcejoin?bot=${bot.id}`
-    );
-  }
-);
-
-/* =========================
-   COMMANDS
-========================= */
-
-app.get(
-  "/commands",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      findBot(req);
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    const commands =
-      db.commands[
-        bot.id
-      ] || {};
-
-    let list = "";
-
-    for (
-      const name of Object.keys(
-        commands
-      )
-    ) {
-      const command =
-        commands[name];
-
-      const response =
-        typeof command ===
-        "string"
-          ? command
-          : command.response ||
-            "";
-
-      list += `
-        <div class="item">
-
-          <h3>
-            ⚡ /${escapeHtml(
-              name
-            )}
-          </h3>
-
-          <p>
-            ${escapeHtml(
-              response
-            )}
-          </p>
-
-          <a
-            class="btn btn-danger"
-            href="/commands/delete?bot=${bot.id}&command=${encodeURIComponent(
-              name
-            )}"
-            onclick="return confirm('این دستور حذف شود؟')">
-            🗑 حذف
-          </a>
-
-        </div>
-      `;
-    }
-
-    res.send(
-      page(
-        req,
-        "دستورات",
-        `
-        <div class="card hero">
-
-          <h1>
-            ⚡ دستورات
-          </h1>
-
-          <a
-            class="btn btn-green"
-            href="/commands/add?bot=${bot.id}">
-            ➕ افزودن دستور
-          </a>
-
-        </div>
-
-        <div class="card">
-
-          ${
-            list ||
-            "<p>هنوز دستوری ثبت نشده است.</p>"
-          }
-
-        </div>
-        `,
-        bot.id
-      )
-    );
-  }
-);
-
-/* =========================
-   ADD COMMAND
-========================= */
-
-app.get(
-  "/commands/add",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      findBot(req);
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    res.send(
-      page(
-        req,
-        "افزودن دستور",
-        `
-        <div class="card hero">
-
-          <h1>
-            ➕ افزودن دستور
-          </h1>
-
-        </div>
-
-        <div class="card">
-
-          <form
-            method="post"
-            action="/commands/add">
-
-            <input
-              type="hidden"
-              name="bot"
-              value="${escapeHtml(
-                bot.id
-              )}">
-
-            <label>
-              نام دستور بدون /
-            </label>
-
-            <input
-              name="command"
-              placeholder="start"
-              required>
-
-            <label>
-              پاسخ ربات
-            </label>
-
-            <textarea
-              name="response"
-              placeholder="سلام 👋"
-              required></textarea>
-
-            <button>
-              💾 ذخیره دستور
-            </button>
-
-          </form>
-
-        </div>
-        `,
-        bot.id
-      )
-    );
-  }
-);
-
-app.post(
-  "/commands/add",
-  requireLogin,
-  (req, res) => {
-    const botId =
-      String(
-        req.body.bot ||
-          ""
-      );
-
-    const command =
-      String(
-        req.body.command ||
-          ""
-      )
-        .trim()
-        .replace(
-          /^\/+/,
-          ""
-        )
-        .replace(
-          /[^a-zA-Z0-9_]/g,
-          ""
-        );
-
-    const response =
-      String(
-        req.body.response ||
-          ""
-      );
-
-    const bot =
-      db.bots.find(
-        item =>
-          item.id ===
-            botId &&
-          String(
-            item.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
-      );
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    if (!command) {
-      return res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              نام دستور نامعتبر است.
-            </div>
-
-          </div>
-          `,
-          bot.id
-        )
-      );
-    }
-
-    if (
-      !db.commands[
-        bot.id
-      ]
-    ) {
-      db.commands[
-        bot.id
-      ] = {};
-    }
-
-    db.commands[
-      bot.id
-    ][command] = {
-      response,
-      createdAt:
-        Date.now()
-    };
-
-    saveDB();
-
-    addActivity(
-      "command",
-      `دستور /${command} اضافه شد.`,
-      bot.id
-    );
-
-    res.redirect(
-      `/commands?bot=${bot.id}`
-    );
-  }
-);
-
-/* =========================
-   DELETE COMMAND
-========================= */
-
-app.get(
-  "/commands/delete",
-  requireLogin,
-  (req, res) => {
-    const botId =
-      String(
-        req.query.bot ||
-          ""
-      );
-
-    const command =
-      String(
-        req.query.command ||
-          ""
-      );
-
-    const bot =
-      db.bots.find(
-        item =>
-          item.id ===
-            botId &&
-          String(
-            item.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
-      );
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    if (
-      db.commands[
-        bot.id
-      ]
-    ) {
-      delete db.commands[
-        bot.id
-      ][command];
-    }
-
-    saveDB();
-
-    res.redirect(
-      `/commands?bot=${bot.id}`
-    );
-  }
-);
-
-/* =========================
-   USERS
-========================= */
-
-app.get(
-  "/users",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      findBot(req);
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    const users =
-      db.botUsers[
-        bot.id
-      ] || {};
-
-    let list = "";
-
-    for (
-      const key of Object.keys(
-        users
-      )
-    ) {
-      const user =
-        users[key];
-
-      const name =
-        [
-          user.first_name,
-          user.last_name
-        ]
-          .filter(Boolean)
-          .join(" ") ||
-        "بدون نام";
-
-      list += `
-        <div class="item">
-
-          <h3>
-            👤 ${escapeHtml(
-              name
-            )}
-          </h3>
-
-          <p>
-            Telegram ID:
-            ${escapeHtml(
-              user.id
-            )}
-          </p>
-
-          ${
-            user.username
-              ? `
-              <p>
-                @${escapeHtml(
-                  user.username
-                )}
-              </p>
-              `
-              : ""
-          }
-
-          <small>
-            آخرین فعالیت:
-            ${new Date(
-              user.updatedAt
-            ).toLocaleString(
-              "fa-IR"
-            )}
-          </small>
-
-        </div>
-      `;
-    }
-
-    res.send(
-      page(
-        req,
-        "آمار کاربران",
-        `
-        <div class="card hero">
-
-          <h1>
-            👥 آمار کاربران
-          </h1>
-
-          <p>
-            ${escapeHtml(
-              bot.name
-            )}
-          </p>
-
-        </div>
-
-        <div class="grid">
-
-          <div class="stat">
-            👥 کل کاربران
-            <strong>
-              ${Object.keys(
-                users
-              ).length}
-            </strong>
-          </div>
-
-        </div>
-
-        <div class="card">
-
-          ${
-            list ||
-            "<p>هنوز کاربری وارد ربات نشده است.</p>"
-          }
-
-        </div>
-        `,
-        bot.id
-      )
-    );
-  }
-);
-
-/* =========================
-   BROADCAST
-========================= */
-
-app.get(
-  "/broadcast",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      findBot(req);
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    const count =
-      Object.keys(
-        db.botUsers[
-          bot.id
-        ] || {}
-      ).length;
-
-    res.send(
-      page(
-        req,
-        "ارسال پیام",
-        `
-        <div class="card hero">
-
-          <h1>
-            📢 ارسال پیام به همه کاربران
-          </h1>
-
-          <p>
-            تعداد کاربران:
-            ${count}
-          </p>
-
-        </div>
-
-        <div class="card">
-
-          <div class="alert">
-
-            برای عکس و ویدیو می‌توانید
-            لینک مستقیم فایل یا
-            file_id تلگرام وارد کنید.
-
-          </div>
-
-          <form
-            method="post"
-            action="/broadcast">
-
-            <input
-              type="hidden"
-              name="bot"
-              value="${escapeHtml(
-                bot.id
-              )}">
-
-            <label>
-              نوع پیام
-            </label>
-
-            <select
-              name="type"
-              onchange="toggleMedia(this.value)">
-
-              <option value="text">
-                📝 متن
-              </option>
-
-              <option value="photo">
-                🖼 عکس
-              </option>
-
-              <option value="video">
-                🎬 ویدیو
-              </option>
-
-            </select>
-
-            <div
-              id="mediaBox"
-              style="display:none">
-
-              <label>
-                لینک فایل یا file_id
-              </label>
-
-              <input
-                name="media"
-                placeholder="https://example.com/file">
-
-            </div>
-
-            <label>
-              متن پیام / کپشن
-            </label>
-
-            <textarea
-              name="text"
-              placeholder="پیام شما..."></textarea>
-
-            <button
-              class="btn-orange">
-              📢 ارسال به همه کاربران
-            </button>
-
-          </form>
-
-        </div>
-
-        <script>
-
-        function toggleMedia(type) {
-
-          document.getElementById(
-            "mediaBox"
-          ).style.display =
-            type === "text"
-              ? "none"
-              : "block";
-
-        }
-
-        </script>
-        `,
-        bot.id
-      )
-    );
-  }
-);
-
-app.post(
-  "/broadcast",
-  requireLogin,
-  async (req, res) => {
-    const botId =
-      String(
-        req.body.bot ||
-          ""
-      );
-
-    const type =
-      String(
-        req.body.type ||
-          "text"
-      );
-
-    const text =
-      String(
-        req.body.text ||
-          ""
-      );
-
-    const media =
-      String(
-        req.body.media ||
-          ""
-      ).trim();
-
-    const bot =
-      db.bots.find(
-        item =>
-          item.id ===
-            botId &&
-          String(
-            item.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
-      );
-
-    if (!bot) {
-      return res.status(
-        404
-      ).send(
-        "Bot not found"
-      );
-    }
-
-    const users =
-      db.botUsers[
-        bot.id
-      ] || {};
-
-    const ids =
-      Object.keys(users);
-
-    let success = 0;
-    let failed = 0;
-
-    for (
-      const chatId of ids
-    ) {
-      try {
-        if (
-          type === "photo"
-        ) {
-          if (!media) {
-            throw new Error(
-              "لینک عکس خالی است."
-            );
-          }
-
-          await sendTelegramPhoto(
-            bot,
-            chatId,
-            media,
-            text
-          );
-
-        } else if (
-          type === "video"
-        ) {
-          if (!media) {
-            throw new Error(
-              "لینک ویدیو خالی است."
-            );
-          }
-
-          await sendTelegramVideo(
-            bot,
-            chatId,
-            media,
-            text
-          );
-
-        } else {
-          if (!text) {
-            throw new Error(
-              "متن خالی است."
-            );
-          }
-
-          await sendTelegramMessage(
-            bot,
-            chatId,
-            text
-          );
-        }
-
-        success++;
-
-        await new Promise(
-          resolve =>
-            setTimeout(
-              resolve,
-              60
-            )
-        );
-
-      } catch {
-        failed++;
-      }
-    }
-
-    addActivity(
-      "broadcast",
-      `ارسال همگانی: ${success} موفق و ${failed} ناموفق.`,
-      bot.id
-    );
-
-    res.send(
-      page(
-        req,
-        "نتیجه ارسال",
-        `
-        <div class="card">
-
-          <h1>
-            📢 نتیجه ارسال
-          </h1>
-
-          <div class="grid">
-
-            <div class="stat">
-              ✅ موفق
-              <strong>
-                ${success}
-              </strong>
-            </div>
-
-            <div class="stat">
-              ❌ ناموفق
-              <strong>
-                ${failed}
-              </strong>
-            </div>
-
-          </div>
-
-          <br>
-
-          <a
-            class="btn"
-            href="/broadcast?bot=${bot.id}">
-            بازگشت
-          </a>
-
-        </div>
-        `,
-        bot.id
-      )
-    );
-  }
-);
-
-/* =========================
-   CREATOR LOGIN
-========================= */
+/* =====================================================
+   CREATOR
+===================================================== */
 
 app.get(
   "/creator/login",
   (req, res) => {
+
     res.send(
       page(
-        req,
         "ورود سازنده",
         `
-        <div class="card hero">
+<div class="auth">
 
-          <h1>
-            👑 ورود سازنده
-          </h1>
+<div class="card">
 
-          <p>
-            ورود به پنل اصلی سازنده
-          </p>
+<h1>
+👑 ورود سازنده
+</h1>
 
-        </div>
+${
+  req.query.error
+    ? `
+<div class="alert alert-error">
+${esc(req.query.error)}
+</div>
+`
+    : ""
+}
 
-        <div class="card">
+<form
+  method="POST"
+  action="/creator/login"
+>
 
-          <form
-            method="post"
-            action="/creator/login">
+<div class="form-group">
 
-            <label>
-              رمز سازنده
-            </label>
+<label>
+رمز سازنده
+</label>
 
-            <input
-              name="password"
-              type="password"
-              required>
+<input
+  type="password"
+  name="password"
+  required
+>
 
-            <button>
-              👑 ورود سازنده
-            </button>
+</div>
 
-          </form>
+<button
+  class="btn"
+  type="submit"
+>
+👑 ورود
+</button>
 
-        </div>
-        `
+</form>
+
+</div>
+
+</div>
+`
       )
     );
   }
@@ -4568,36 +4230,21 @@ app.get(
 app.post(
   "/creator/login",
   (req, res) => {
+
     const password =
       String(
-        req.body.password ||
-          ""
+        req.body.password || ""
       );
 
     if (
       password !==
       ADMIN_PASSWORD
     ) {
-      return res.send(
-        page(
-          req,
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              ❌ رمز سازنده اشتباه است.
-            </div>
-
-            <a
-              class="btn"
-              href="/creator/login">
-              بازگشت
-            </a>
-
-          </div>
-          `
-        )
+      return res.redirect(
+        "/creator/login?error=" +
+          encodeURIComponent(
+            "رمز اشتباه است."
+          )
       );
     }
 
@@ -4610,127 +4257,97 @@ app.post(
   }
 );
 
-/* =========================
-   CREATOR
-========================= */
-
 app.get(
   "/creator",
   requireCreator,
   (req, res) => {
-    let totalBotUsers = 0;
-
-    for (
-      const bot of db.bots
-    ) {
-      totalBotUsers +=
-        Object.keys(
-          db.botUsers[
-            bot.id
-          ] || {}
-        ).length;
-    }
-
-    let bots = "";
-
-    for (
-      const bot of db.bots
-    ) {
-      bots += `
-        <div class="item">
-
-          <h3>
-            🤖 ${escapeHtml(
-              bot.name
-            )}
-          </h3>
-
-          <p>
-            @${escapeHtml(
-              bot.username ||
-                ""
-            )}
-          </p>
-
-          <p>
-            👥 کاربران:
-            ${
-              Object.keys(
-                db.botUsers[
-                  bot.id
-                ] || {}
-              ).length
-            }
-          </p>
-
-        </div>
-      `;
-    }
 
     res.send(
       page(
-        req,
         "پنل سازنده",
         `
-        <div class="card hero">
+<h1>
+👑 پنل سازنده
+</h1>
 
-          <h1>
-            👑 پنل سازنده
-          </h1>
+<div class="grid">
 
-          <a
-            class="btn btn-danger"
-            href="/creator/logout">
-            🚪 خروج سازنده
-          </a>
+<div class="stat">
+👥 کاربران
+<div class="stat-number">
+${db.users.length}
+</div>
+</div>
 
-        </div>
+<div class="stat">
+🤖 ربات‌ها
+<div class="stat-number">
+${db.bots.length}
+</div>
+</div>
 
-        <div class="grid">
+<div class="stat">
+👤 کاربران تلگرام
+<div class="stat-number">
+${totalBotUsers()}
+</div>
+</div>
 
-          <div class="stat">
-            👤 حساب‌ها
-            <strong>
-              ${db.users.length}
-            </strong>
-          </div>
+<div class="stat">
+🎬 فعالیت‌ها
+<div class="stat-number">
+${db.activities.length}
+</div>
+</div>
 
-          <div class="stat">
-            🤖 ربات‌ها
-            <strong>
-              ${db.bots.length}
-            </strong>
-          </div>
+</div>
 
-          <div class="stat">
-            👥 کاربران
-            <strong>
-              ${totalBotUsers}
-            </strong>
-          </div>
+<div class="card">
 
-          <div class="stat">
-            📌 فعالیت‌ها
-            <strong>
-              ${db.activity.length}
-            </strong>
-          </div>
+<h2>
+🤖 ربات‌ها
+</h2>
 
-        </div>
+${
+  db.bots.length
+    ? db.bots
+        .map(
+          bot => `
+<div class="list-item">
 
-        <div class="card">
+<div class="item-row">
 
-          <h2>
-            🤖 ربات‌ها
-          </h2>
+<div>
 
-          ${
-            bots ||
-            "<p>رباتی وجود ندارد.</p>"
-          }
+<strong>
+${esc(bot.name)}
+</strong>
 
-        </div>
-        `
+<div class="muted">
+@${esc(bot.username)}
+</div>
+
+</div>
+
+<span class="badge">
+${esc(bot.ownerId)}
+</span>
+
+</div>
+
+</div>
+`
+        )
+        .join("")
+    : `
+<div class="empty">
+رباتی وجود ندارد.
+</div>
+`
+}
+
+</div>
+`
       )
     );
   }
@@ -4739,24 +4356,26 @@ app.get(
 app.get(
   "/creator/logout",
   (req, res) => {
+
     req.session.creator =
       false;
 
-    res.redirect("/");
+    res.redirect(
+      "/creator/login"
+    );
   }
 );
 
-/* =========================
+/* =====================================================
    HEALTH
-========================= */
+===================================================== */
 
 app.get(
   "/health",
   (req, res) => {
+
     res.json({
       ok: true,
-      service:
-        "nova-proxy",
       bots:
         db.bots.length,
       users:
@@ -4767,94 +4386,75 @@ app.get(
   }
 );
 
-/* =========================
+/* =====================================================
    404
-========================= */
+===================================================== */
 
 app.use(
   (req, res) => {
+
     res.status(404).send(
       page(
-        req,
         "404",
         `
-        <div class="card">
+<div class="card center">
 
-          <h1>
-            404
-          </h1>
+<h1>
+404
+</h1>
 
-          <p>
-            صفحه موردنظر پیدا نشد.
-          </p>
+<p>
+صفحه پیدا نشد.
+</p>
 
-          <a
-            class="btn"
-            href="/dashboard">
-            📊 داشبورد
-          </a>
+<a
+  class="btn"
+  href="/dashboard"
+>
+بازگشت
+</a>
 
-        </div>
-        `
+</div>
+`,
+        {
+          loggedIn:
+            !!req.session.userId,
+          creator:
+            !!req.session.creator
+        }
       )
     );
   }
 );
 
-/* =========================
-   ERROR
-========================= */
-
-app.use(
-  (
-    error,
-    req,
-    res,
-    next
-  ) => {
-    console.error(
-      "Express error:",
-      error
-    );
-
-    res.status(500).send(
-      `
-      <div
-        style="
-          direction:rtl;
-          font-family:Tahoma;
-          padding:40px;
-        "
-      >
-
-        <h1>
-          خطای داخلی سرور
-        </h1>
-
-        <p>
-          ${escapeHtml(
-            error.message
-          )}
-        </p>
-
-      </div>
-      `
-    );
-  }
-);
-
-/* =========================
+/* =====================================================
    START SERVER
-========================= */
+===================================================== */
 
 app.listen(
   PORT,
-  "0.0.0.0",
   () => {
+
     console.log(
-      `Nova Proxy running on port ${PORT}`
+      "Nova Proxy running on port",
+      PORT
     );
 
-    startAllBots();
+    /*
+     * تمام ربات‌های ذخیره‌شده
+     * دوباره Poll می‌شوند.
+     */
+    for (
+      const bot of db.bots
+    ) {
+
+      ensureForceJoinState(
+        bot
+      );
+
+      startBotPolling(
+        bot
+      );
+    }
   }
 );
