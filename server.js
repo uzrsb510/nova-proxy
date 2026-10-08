@@ -3,7 +3,6 @@ const session = require("express-session");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const multer = require("multer");
 
 const app = express();
 
@@ -14,22 +13,10 @@ const SESSION_SECRET =
 
 const DATA_DIR = path.join(__dirname, "data");
 const DATA_FILE = path.join(DATA_DIR, "data.json");
-const UPLOAD_DIR = path.join(__dirname, "uploads");
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
-
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-
-const upload = multer({
-  dest: UPLOAD_DIR,
-  limits: {
-    fileSize: 50 * 1024 * 1024
-  }
-});
 
 function makeId() {
   return crypto.randomBytes(12).toString("hex");
@@ -45,63 +32,25 @@ function defaultDB() {
   };
 }
 
-function saveDB() {
-  fs.writeFileSync(
-    DATA_FILE,
-    JSON.stringify(db, null, 2),
-    "utf8"
-  );
-}
-
-function logActivity(type, text, botId = null) {
-  if (!Array.isArray(db.activity)) {
-    db.activity = [];
-  }
-
-  db.activity.unshift({
-    id: makeId(),
-    type,
-    text,
-    botId,
-    time: Date.now()
-  });
-
-  if (db.activity.length > 300) {
-    db.activity = db.activity.slice(0, 300);
-  }
-
-  saveDB();
-}
-
 function normalizeDB(data) {
   if (!data || typeof data !== "object") {
-    return defaultDB();
+    data = defaultDB();
   }
 
-  if (!Array.isArray(data.users)) {
-    data.users = [];
-  }
-
-  if (!Array.isArray(data.bots)) {
-    data.bots = [];
-  }
-
+  if (!Array.isArray(data.users)) data.users = [];
+  if (!Array.isArray(data.bots)) data.bots = [];
   if (!data.botUsers || typeof data.botUsers !== "object") {
     data.botUsers = {};
   }
-
   if (!data.commands || typeof data.commands !== "object") {
     data.commands = {};
   }
-
   if (!Array.isArray(data.activity)) {
     data.activity = [];
   }
 
   for (const bot of data.bots) {
-    if (!bot.id) {
-      bot.id = makeId();
-    }
+    if (!bot.id) bot.id = makeId();
 
     if (!Array.isArray(bot.forceJoins)) {
       if (Array.isArray(bot.forceJoin)) {
@@ -144,17 +93,48 @@ let db;
 try {
   if (fs.existsSync(DATA_FILE)) {
     db = normalizeDB(
-      JSON.parse(
-        fs.readFileSync(DATA_FILE, "utf8")
-      )
+      JSON.parse(fs.readFileSync(DATA_FILE, "utf8"))
     );
   } else {
     db = defaultDB();
-    saveDB();
+    fs.writeFileSync(
+      DATA_FILE,
+      JSON.stringify(db, null, 2),
+      "utf8"
+    );
   }
 } catch (error) {
-  console.error("Database load error:", error);
+  console.error("Database error:", error);
   db = defaultDB();
+
+  fs.writeFileSync(
+    DATA_FILE,
+    JSON.stringify(db, null, 2),
+    "utf8"
+  );
+}
+
+function saveDB() {
+  fs.writeFileSync(
+    DATA_FILE,
+    JSON.stringify(db, null, 2),
+    "utf8"
+  );
+}
+
+function addActivity(type, text, botId = null) {
+  db.activity.unshift({
+    id: makeId(),
+    type,
+    text,
+    botId,
+    createdAt: Date.now()
+  });
+
+  if (db.activity.length > 500) {
+    db.activity = db.activity.slice(0, 500);
+  }
+
   saveDB();
 }
 
@@ -205,19 +185,11 @@ function requireCreator(req, res, next) {
   next();
 }
 
-function findUser(req) {
-  return db.users.find(
-    user =>
-      String(user.id) ===
-      String(req.session.userId)
-  );
-}
-
 function findBot(req) {
   const id = String(
     req.query.bot ||
-    req.params.id ||
-    ""
+      req.params.id ||
+      ""
   );
 
   return db.bots.find(
@@ -232,11 +204,7 @@ function telegramUrl(token, method) {
   return `https://api.telegram.org/bot${token}/${method}`;
 }
 
-async function telegram(
-  token,
-  method,
-  body = {}
-) {
+async function telegram(token, method, body = {}) {
   const response = await fetch(
     telegramUrl(token, method),
     {
@@ -254,7 +222,7 @@ async function telegram(
     data = await response.json();
   } catch {
     throw new Error(
-      "Telegram پاسخ نامعتبر داد."
+      "پاسخ نامعتبر از Telegram دریافت شد."
     );
   }
 
@@ -267,6 +235,10 @@ async function telegram(
 
   return data.result;
 }
+
+/* =========================
+   TELEGRAM
+========================= */
 
 async function sendTelegramMessage(
   bot,
@@ -286,6 +258,50 @@ async function sendTelegramMessage(
   return telegram(
     bot.token,
     "sendMessage",
+    body
+  );
+}
+
+async function sendTelegramPhoto(
+  bot,
+  chatId,
+  photo,
+  caption
+) {
+  const body = {
+    chat_id: chatId,
+    photo
+  };
+
+  if (caption) {
+    body.caption = caption;
+  }
+
+  return telegram(
+    bot.token,
+    "sendPhoto",
+    body
+  );
+}
+
+async function sendTelegramVideo(
+  bot,
+  chatId,
+  video,
+  caption
+) {
+  const body = {
+    chat_id: chatId,
+    video
+  };
+
+  if (caption) {
+    body.caption = caption;
+  }
+
+  return telegram(
+    bot.token,
+    "sendVideo",
     body
   );
 }
@@ -352,21 +368,17 @@ function parsePublicTelegramLink(input) {
     .split("/")[0]
     .trim();
 
-  if (
-    !username ||
-    username.startsWith("+")
-  ) {
+  if (!username || username.startsWith("+")) {
     throw new Error(
       "لینک دعوت خصوصی قابل استفاده نیست."
     );
   }
 
+  const clean = username.replace(/^@/, "");
+
   return {
-    username:
-      "@" + username.replace(/^@/, ""),
-    link:
-      "https://t.me/" +
-      username.replace(/^@/, "")
+    username: "@" + clean,
+    link: "https://t.me/" + clean
   };
 }
 
@@ -427,7 +439,7 @@ async function checkMembership(
     return false;
   } catch (error) {
     console.error(
-      "Membership check:",
+      "Membership error:",
       error.message
     );
 
@@ -457,15 +469,10 @@ function ensureForceJoinState(bot) {
     }
   }
 
-  if (changed) {
-    saveDB();
-  }
+  return changed;
 }
 
-function getVerifiedJoins(
-  bot,
-  userId
-) {
+function getVerifiedJoins(bot, userId) {
   ensureForceJoinState(bot);
 
   const key = String(userId);
@@ -515,9 +522,8 @@ function markJoinVerified(
 
 /*
   مهم:
-  هر عضویت فقط یک بار بررسی می‌شود.
-  اگر کاربر قبلاً برای همان مورد تأیید شده باشد،
-  دوباره از او درخواست عضویت نمی‌شود.
+  فقط مواردی که کاربر قبلاً تأیید نکرده
+  دوباره بررسی می‌شوند.
 */
 async function checkAllMemberships(
   bot,
@@ -538,6 +544,8 @@ async function checkAllMemberships(
     };
   }
 
+  let changed = false;
+
   for (const join of unverified) {
     const isMember =
       await checkMembership(
@@ -547,6 +555,10 @@ async function checkAllMemberships(
       );
 
     if (!isMember) {
+      if (changed) {
+        saveDB();
+      }
+
       return {
         ok: false,
         missing: join
@@ -558,19 +570,19 @@ async function checkAllMemberships(
       userId,
       join.id
     );
+
+    changed = true;
   }
 
-  saveDB();
+  if (changed) {
+    saveDB();
+  }
 
   return {
     ok: true,
     missing: null
   };
 }
-
-/* =========================
-   COMMANDS
-========================= */
 
 function getCommandNameFromText(text) {
   if (
@@ -593,14 +605,11 @@ function getCommandNameFromText(text) {
     .split("@")[0]
     .trim();
 
-  if (!command) {
-    return null;
-  }
-
-  command = command.replace(
-    /[^a-zA-Z0-9_]/g,
-    ""
-  );
+  command = command
+    .replace(
+      /[^a-zA-Z0-9_]/g,
+      ""
+    );
 
   return command || null;
 }
@@ -634,55 +643,70 @@ async function sendJoinMessage(
   return sendTelegramMessage(
     bot,
     chatId,
-    "🔐 برای شروع ربات ابتدا باید در کانال یا گروه‌های زیر عضو شوید.\n\n📢 بعد از عضویت، روی «بررسی عضویت» بزنید.",
+    "🔐 عضویت اجباری\n\n" +
+      "برای استفاده از ربات ابتدا باید در کانال یا گروه زیر عضو شوید.\n\n" +
+      "1️⃣ روی دکمه کانال یا گروه بزنید.\n" +
+      "2️⃣ واقعاً عضو شوید.\n" +
+      "3️⃣ سپس روی «بررسی عضویت» بزنید.",
     {
       inline_keyboard: buttons
     }
   );
 }
 
-async function handleStart(
+/* =========================
+   COMMAND EXECUTION
+========================= */
+
+async function executeCommand(
   bot,
-  message
+  chatId,
+  text
 ) {
-  const userId =
-    message.from.id;
+  const commandName =
+    getCommandNameFromText(text);
 
-  const chatId =
-    message.chat.id;
-
-  ensureForceJoinState(bot);
-
-  /*
-    عضویت اجباری فقط همین‌جا اجرا می‌شود.
-    بنابراین دستورات دیگر بدون عضویت هم کار می‌کنند.
-  */
-
-  if (
-    bot.forceJoins.length > 0
-  ) {
-    const result =
-      await checkAllMemberships(
-        bot,
-        userId
-      );
-
-    if (!result.ok) {
-      await sendJoinMessage(
-        bot,
-        chatId
-      );
-
-      return;
-    }
+  if (!commandName) {
+    return false;
   }
 
-  await executeCommand(
+  const commands =
+    db.commands[bot.id] || {};
+
+  const command =
+    commands[commandName];
+
+  if (!command) {
+    return false;
+  }
+
+  const response =
+    typeof command === "string"
+      ? command
+      : command.response || "";
+
+  if (!response) {
+    return false;
+  }
+
+  await sendTelegramMessage(
     bot,
     chatId,
-    "/start"
+    response
   );
+
+  addActivity(
+    "command",
+    `دستور /${commandName} توسط کاربر ${chatId} اجرا شد.`,
+    bot.id
+  );
+
+  return true;
 }
+
+/* =========================
+   CALLBACK
+========================= */
 
 async function handleCallback(
   bot,
@@ -709,6 +733,9 @@ async function handleCallback(
   }
 
   try {
+    /*
+      اینجا واقعاً Telegram بررسی می‌شود.
+    */
     const result =
       await checkAllMemberships(
         bot,
@@ -753,6 +780,15 @@ async function handleCallback(
       );
     }
 
+    addActivity(
+      "join",
+      `عضویت کاربر ${userId} تأیید شد.`,
+      bot.id
+    );
+
+    /*
+      بعد از تأیید، خود /start اجرا می‌شود.
+    */
     await executeCommand(
       bot,
       chatId,
@@ -807,78 +843,32 @@ function saveBotUser(
   db.botUsers[bot.id][key] = {
     id: telegramUser.id,
     first_name:
-      telegramUser.first_name || "",
+      telegramUser.first_name ||
+      "",
     last_name:
-      telegramUser.last_name || "",
+      telegramUser.last_name ||
+      "",
     username:
-      telegramUser.username || "",
+      telegramUser.username ||
+      "",
     language_code:
-      telegramUser.language_code || "",
-    updatedAt: Date.now(),
+      telegramUser.language_code ||
+      "",
     createdAt:
       old?.createdAt ||
-      Date.now()
+      Date.now(),
+    updatedAt: Date.now()
   };
 
   saveDB();
 
   if (isNew) {
-    logActivity(
+    addActivity(
       "user",
-      `👤 کاربر جدید وارد ربات «${bot.name}» شد.`,
+      `کاربر جدید ${telegramUser.id} وارد ربات ${bot.name} شد.`,
       bot.id
     );
   }
-}
-
-/* =========================
-   EXECUTE COMMAND
-========================= */
-
-async function executeCommand(
-  bot,
-  chatId,
-  text
-) {
-  const commandName =
-    getCommandNameFromText(text);
-
-  if (!commandName) {
-    return false;
-  }
-
-  const commands =
-    db.commands[bot.id] || {};
-
-  const command =
-    commands[commandName];
-
-  if (!command) {
-    return false;
-  }
-
-  const response =
-    typeof command === "string"
-      ? command
-      : command.response || "";
-
-  if (!response) {
-    return false;
-  }
-
-  await sendTelegramMessage(
-    bot,
-    chatId,
-    response
-  );
-
-  logActivity(
-    "command",
-    `⚡ دستور /${commandName} در ربات «${bot.name}» اجرا شد.`,
-    bot.id
-  );
-
-  return true;
 }
 
 /* =========================
@@ -921,27 +911,56 @@ async function handleUpdate(
   );
 
   /*
-    فقط /start عضویت اجباری دارد.
+    عضویت اجباری فقط برای /start
+    اجرا می‌شود.
   */
-
-  if (
-    message.text &&
+  const commandName =
     getCommandNameFromText(
       message.text
-    ) === "start"
+    );
+
+  if (
+    commandName === "start"
   ) {
-    await handleStart(
+    ensureForceJoinState(bot);
+
+    if (bot.forceJoins.length > 0) {
+      const result =
+        await checkAllMemberships(
+          bot,
+          from.id
+        );
+
+      if (!result.ok) {
+        try {
+          await sendJoinMessage(
+            bot,
+            chatId
+          );
+        } catch (error) {
+          console.error(
+            "Join message error:",
+            error.message
+          );
+        }
+
+        return;
+      }
+    }
+
+    await executeCommand(
       bot,
-      message
+      chatId,
+      message.text
     );
 
     return;
   }
 
   /*
-    بقیه دستورات بدون بررسی عضویت اجرا می‌شوند.
+    هیچ بررسی عضویتی برای دستورات دیگر
+    انجام نمی‌شود.
   */
-
   if (message.text) {
     await executeCommand(
       bot,
@@ -959,10 +978,7 @@ const pollingState =
   new Map();
 
 async function pollBot(bot) {
-  if (
-    !bot ||
-    !bot.token
-  ) {
+  if (!bot?.token) {
     return;
   }
 
@@ -973,19 +989,19 @@ async function pollBot(bot) {
     return;
   }
 
+  const old =
+    pollingState.get(bot.id);
+
+  const state = {
+    running: true,
+    offset:
+      old?.offset || 0
+  };
+
   pollingState.set(
     bot.id,
-    {
-      running: true,
-      offset:
-        pollingState.get(
-          bot.id
-        )?.offset || 0
-    }
+    state
   );
-
-  const state =
-    pollingState.get(bot.id);
 
   try {
     await telegram(
@@ -1015,8 +1031,7 @@ async function pollBot(bot) {
 
     const currentBot =
       db.bots.find(
-        b =>
-          b.id === bot.id
+        b => b.id === bot.id
       );
 
     if (!currentBot) {
@@ -1056,14 +1071,14 @@ async function pollBot(bot) {
           );
         } catch (error) {
           console.error(
-            `Update error ${currentBot.id}:`,
+            "Update error:",
             error.message
           );
         }
       }
     } catch (error) {
       console.error(
-        `Polling error ${currentBot.id}:`,
+        "Polling error:",
         error.message
       );
 
@@ -1097,9 +1112,7 @@ function stopBotPolling(
   botId
 ) {
   const state =
-    pollingState.get(
-      botId
-    );
+    pollingState.get(botId);
 
   if (state) {
     state.running = false;
@@ -1110,7 +1123,7 @@ function stopBotPolling(
 }
 
 /* =========================
-   THEME + MENU
+   UI
 ========================= */
 
 function page(
@@ -1118,18 +1131,22 @@ function page(
   content,
   botId = ""
 ) {
-  const botQuery = botId
-    ? `?bot=${encodeURIComponent(
-        botId
-      )}`
-    : "";
+  const botQuery =
+    botId
+      ? `?bot=${encodeURIComponent(
+          botId
+        )}`
+      : "";
 
   return `
 <!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
+
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<meta name="viewport"
+content="width=device-width, initial-scale=1.0">
 
 <title>${escapeHtml(
     title
@@ -1142,51 +1159,65 @@ function page(
 }
 
 :root {
-  --bg: #f4f7ff;
   --text: #172033;
-  --card: rgba(255,255,255,.92);
-  --border: #e5e7eb;
-  --input: #ffffff;
-  --muted: #64748b;
+  --card: rgba(255,255,255,.88);
+  --border: rgba(255,255,255,.5);
+  --shadow: 0 15px 45px rgba(15,23,42,.15);
 }
 
-body.dark {
-  --bg: #0b1020;
-  --text: #f1f5f9;
-  --card: rgba(20,27,45,.94);
-  --border: #263248;
-  --input: #111827;
-  --muted: #94a3b8;
-}
-
-html,
-body {
-  min-height: 100%;
+html.dark {
+  --text: #f4f7ff;
+  --card: rgba(17,24,39,.90);
+  --border: rgba(255,255,255,.08);
+  --shadow: 0 15px 45px rgba(0,0,0,.4);
 }
 
 body {
   margin: 0;
+  min-height: 100vh;
   font-family: Tahoma, Arial, sans-serif;
   color: var(--text);
+
   background:
     radial-gradient(
       circle at 10% 20%,
-      rgba(99,102,241,.28),
-      transparent 28%
+      rgba(255,0,128,.35),
+      transparent 30%
     ),
     radial-gradient(
-      circle at 90% 15%,
-      rgba(236,72,153,.25),
-      transparent 28%
+      circle at 90% 10%,
+      rgba(0,200,255,.35),
+      transparent 30%
     ),
     radial-gradient(
       circle at 50% 90%,
-      rgba(6,182,212,.25),
+      rgba(100,50,255,.35),
+      transparent 35%
+    ),
+    linear-gradient(
+      135deg,
+      #6d28d9,
+      #2563eb,
+      #0891b2,
+      #db2777
+    );
+
+  background-attachment: fixed;
+}
+
+body.dark-bg {
+  background:
+    radial-gradient(
+      circle at 20% 20%,
+      rgba(99,102,241,.25),
       transparent 30%
     ),
-    var(--bg);
-  background-attachment: fixed;
-  transition: .3s;
+    radial-gradient(
+      circle at 80% 80%,
+      rgba(236,72,153,.18),
+      transparent 30%
+    ),
+    #050816;
 }
 
 a {
@@ -1202,83 +1233,97 @@ select {
 }
 
 .topbar {
-  height: 68px;
-  background: rgba(15,23,42,.88);
-  backdrop-filter: blur(15px);
-  color: white;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 18px;
   position: sticky;
   top: 0;
   z-index: 1000;
+
+  height: 72px;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  padding: 0 20px;
+
+  background: rgba(10,15,30,.82);
+  backdrop-filter: blur(15px);
+
+  color: white;
+
   box-shadow:
-    0 10px 35px rgba(0,0,0,.18);
+    0 8px 30px rgba(0,0,0,.2);
 }
 
 .brand {
-  font-weight: bold;
   font-size: 18px;
+  font-weight: bold;
 }
 
-.menu-button {
-  width: 43px;
-  height: 43px;
+.menu-btn {
+  width: 45px;
+  height: 45px;
+
   border: 0;
   border-radius: 12px;
-  background:
-    linear-gradient(
-      135deg,
-      #6366f1,
-      #ec4899
-    );
+
+  background: linear-gradient(
+    135deg,
+    #8b5cf6,
+    #ec4899
+  );
+
   color: white;
-  font-size: 23px;
+
+  font-size: 24px;
+
   cursor: pointer;
 }
 
-.refresh-button {
-  position: fixed;
-  left: 18px;
-  top: 82px;
-  width: 38px;
-  height: 38px;
+.refresh-btn {
+  width: 40px;
+  height: 40px;
+
   border: 0;
-  border-radius: 11px;
-  background:
-    linear-gradient(
-      135deg,
-      #06b6d4,
-      #3b82f6
-    );
+  border-radius: 12px;
+
+  background: rgba(255,255,255,.12);
   color: white;
-  font-size: 18px;
+
   cursor: pointer;
-  z-index: 900;
-  box-shadow:
-    0 8px 20px rgba(0,0,0,.18);
+  font-size: 19px;
 }
 
 .side-menu {
   position: fixed;
-  right: -330px;
+
   top: 0;
+  right: -330px;
+
   width: 310px;
-  height: 100%;
+  max-width: 88vw;
+  height: 100vh;
+
+  z-index: 2000;
+
   background:
     linear-gradient(
-      180deg,
+      160deg,
       #111827,
-      #1e1b4b
+      #1e1b4b,
+      #312e81
     );
+
   color: white;
-  z-index: 2000;
-  padding: 80px 16px 20px;
-  transition: .3s;
+
+  padding: 85px 16px 20px;
+
+  transition:
+    right .25s ease;
+
   overflow-y: auto;
+
   box-shadow:
-    -10px 0 35px rgba(0,0,0,.25);
+    -15px 0 40px rgba(0,0,0,.3);
 }
 
 .side-menu.open {
@@ -1287,10 +1332,14 @@ select {
 
 .menu-overlay {
   position: fixed;
+
   inset: 0;
-  background: rgba(0,0,0,.48);
+
+  z-index: 1500;
+
+  background: rgba(0,0,0,.5);
+
   display: none;
-  z-index: 1900;
 }
 
 .menu-overlay.show {
@@ -1298,60 +1347,81 @@ select {
 }
 
 .menu-title {
-  font-size: 21px;
+  padding: 15px;
+  margin-bottom: 10px;
+
+  border-radius: 14px;
+
+  background:
+    linear-gradient(
+      135deg,
+      #7c3aed,
+      #db2777
+    );
+
   font-weight: bold;
-  margin-bottom: 22px;
-  text-align: center;
 }
 
 .menu-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  width: 100%;
+
   padding: 14px;
+
+  margin: 7px 0;
+
   border-radius: 13px;
-  margin-bottom: 9px;
+
   background: rgba(255,255,255,.08);
+
   transition: .2s;
 }
 
 .menu-item:hover {
-  background:
-    linear-gradient(
-      90deg,
-      rgba(99,102,241,.7),
-      rgba(236,72,153,.7)
-    );
-  transform: translateX(-4px);
+  background: rgba(255,255,255,.18);
+  transform: translateX(-3px);
 }
 
-.menu-danger {
-  background: rgba(239,68,68,.2);
-}
-
-.menu-creator {
-  margin-top: 18px;
-  background:
-    linear-gradient(
-      90deg,
-      #f59e0b,
-      #ef4444
-    );
+.menu-divider {
+  height: 1px;
+  background: rgba(255,255,255,.12);
+  margin: 15px 0;
 }
 
 .container {
   width: min(1150px, 94%);
-  margin: 30px auto;
-  padding-bottom: 50px;
+  margin: 28px auto 60px;
 }
 
 .card {
   background: var(--card);
-  border: 1px solid var(--border);
+
+  border:
+    1px solid var(--border);
+
   border-radius: 22px;
+
   padding: 24px;
-  margin-bottom: 18px;
-  box-shadow:
-    0 15px 45px rgba(15,23,42,.09);
-  backdrop-filter: blur(12px);
+
+  margin-bottom: 20px;
+
+  box-shadow: var(--shadow);
+
+  backdrop-filter: blur(15px);
+}
+
+.hero {
+  background:
+    linear-gradient(
+      135deg,
+      rgba(124,58,237,.94),
+      rgba(219,39,119,.92)
+    );
+
+  color: white;
 }
 
 h1,
@@ -1360,46 +1430,58 @@ h3 {
   margin-top: 0;
 }
 
-p {
-  line-height: 1.9;
-}
-
 input,
 textarea,
 select {
   width: 100%;
-  padding: 13px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  margin: 7px 0 15px;
-  background: var(--input);
-  color: var(--text);
+
+  padding: 13px 15px;
+
+  border:
+    1px solid #d8deea;
+
+  border-radius: 13px;
+
+  margin:
+    7px 0 15px;
+
   font-size: 15px;
-  outline: none;
+
+  background: rgba(255,255,255,.95);
 }
 
 textarea {
-  min-height: 140px;
+  min-height: 150px;
   resize: vertical;
 }
 
 button,
 .btn {
+  display: inline-flex;
+
+  align-items: center;
+  justify-content: center;
+
+  gap: 7px;
+
   border: 0;
+
+  padding: 12px 17px;
+
+  border-radius: 12px;
+
+  cursor: pointer;
+
+  color: white;
+
   background:
     linear-gradient(
       135deg,
-      #4f46e5,
+      #2563eb,
       #7c3aed
     );
-  color: white;
-  padding: 12px 17px;
-  border-radius: 12px;
-  cursor: pointer;
-  display: inline-block;
-  font-family: inherit;
-  font-weight: bold;
-  margin: 3px;
+
+  font-size: 14px;
 }
 
 .btn-green {
@@ -1424,50 +1506,56 @@ button,
   background:
     linear-gradient(
       135deg,
-      #f59e0b,
-      #f97316
+      #ea580c,
+      #f59e0b
     );
 }
 
 .btn-gray {
-  background: #475569;
+  background:
+    linear-gradient(
+      135deg,
+      #475569,
+      #334155
+    );
 }
 
 .grid {
   display: grid;
+
   grid-template-columns:
     repeat(
       auto-fit,
-      minmax(210px, 1fr)
+      minmax(220px, 1fr)
     );
+
   gap: 16px;
 }
 
 .stat {
-  position: relative;
-  overflow: hidden;
-  border-radius: 20px;
-  padding: 23px;
+  padding: 22px;
+
+  border-radius: 18px;
+
   color: white;
+
   background:
     linear-gradient(
       135deg,
-      #4f46e5,
-      #9333ea,
-      #ec4899
+      #2563eb,
+      #7c3aed
     );
+
   box-shadow:
-    0 15px 30px rgba(79,70,229,.2);
-  animation:
-    statIn .7s ease;
+    0 12px 30px rgba(37,99,235,.25);
 }
 
 .stat:nth-child(2) {
   background:
     linear-gradient(
       135deg,
-      #0891b2,
-      #2563eb
+      #db2777,
+      #9333ea
     );
 }
 
@@ -1476,7 +1564,7 @@ button,
     linear-gradient(
       135deg,
       #059669,
-      #14b8a6
+      #0891b2
     );
 }
 
@@ -1484,173 +1572,140 @@ button,
   background:
     linear-gradient(
       135deg,
-      #f97316,
-      #ef4444
+      #ea580c,
+      #eab308
     );
 }
 
 .stat strong {
   display: block;
-  font-size: 36px;
+  font-size: 34px;
   margin-top: 10px;
 }
 
-@keyframes statIn {
-  from {
-    opacity: 0;
-    transform: translateY(20px)
-      scale(.95);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0)
-      scale(1);
-  }
+.item {
+  padding: 17px;
+
+  border:
+    1px solid rgba(100,116,139,.18);
+
+  border-radius: 15px;
+
+  margin-bottom: 12px;
+
+  background:
+    rgba(255,255,255,.35);
+}
+
+.dark .item {
+  background:
+    rgba(255,255,255,.05);
 }
 
 .alert {
-  background: #fff7d6;
-  color: #713f12;
-  border: 1px solid #facc15;
-  padding: 14px;
-  border-radius: 13px;
-  margin-bottom: 15px;
-}
-
-body.dark .alert {
-  color: #fef3c7;
-  background: #422006;
-}
-
-.success {
-  background: #dcfce7;
-  color: #14532d;
-}
-
-.error {
-  background: #fee2e2;
-  color: #7f1d1d;
-}
-
-.item {
-  border: 1px solid var(--border);
-  background: rgba(255,255,255,.04);
-  padding: 17px;
-  border-radius: 15px;
-  margin-bottom: 12px;
-}
-
-.timeline {
-  position: relative;
-  padding-right: 25px;
-}
-
-.timeline:before {
-  content: "";
-  position: absolute;
-  right: 7px;
-  top: 0;
-  bottom: 0;
-  width: 3px;
-  background:
-    linear-gradient(
-      #6366f1,
-      #ec4899,
-      #06b6d4
-    );
-  border-radius: 5px;
-}
-
-.timeline-item {
-  position: relative;
-  margin-bottom: 14px;
   padding: 15px;
-  border-radius: 15px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  animation:
-    timelineIn .6s ease both;
+
+  border-radius: 13px;
+
+  margin-bottom: 15px;
+
+  background: #fff7d6;
+
+  color: #713f12;
 }
 
-.timeline-item:before {
-  content: "";
-  position: absolute;
-  right: -25px;
-  top: 20px;
-  width: 13px;
-  height: 13px;
-  border-radius: 50%;
-  background: #6366f1;
-  box-shadow:
-    0 0 0 5px rgba(99,102,241,.18);
+.alert.error {
+  background: #fee2e2;
+  color: #991b1b;
 }
 
-@keyframes timelineIn {
-  from {
-    opacity: 0;
-    transform: translateX(20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
-  }
+.alert.success {
+  background: #dcfce7;
+  color: #166534;
 }
 
-.hero {
-  padding: 30px;
-  border-radius: 25px;
-  color: white;
+.activity {
+  display: flex;
+  gap: 13px;
+
+  padding: 13px 0;
+
+  border-bottom:
+    1px solid rgba(100,116,139,.15);
+}
+
+.activity-icon {
+  width: 42px;
+  height: 42px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border-radius: 12px;
+
   background:
     linear-gradient(
       135deg,
-      #4f46e5,
-      #7c3aed,
-      #db2777
+      #6366f1,
+      #ec4899
     );
-  margin-bottom: 20px;
-  box-shadow:
-    0 20px 45px rgba(79,70,229,.25);
-}
 
-.hero h1 {
-  font-size: 30px;
+  color: white;
 }
 
 .badge {
   display: inline-block;
+
   padding: 6px 10px;
+
   border-radius: 999px;
-  background: rgba(99,102,241,.14);
-  color: #6366f1;
+
+  background: #e0e7ff;
+  color: #3730a3;
+
   font-size: 12px;
+}
+
+small {
+  opacity: .7;
 }
 
 pre {
   direction: ltr;
   text-align: left;
-  background: #020617;
-  color: #e2e8f0;
+
+  background: #0f172a;
+  color: white;
+
   padding: 15px;
-  border-radius: 12px;
+
+  border-radius: 13px;
+
   overflow: auto;
 }
 
-small {
-  color: var(--muted);
+.mobile-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 @media(max-width:600px) {
-  .container {
-    width: 92%;
-    margin-top: 22px;
-  }
-
-  .side-menu {
-    width: 285px;
+  .topbar {
+    padding: 0 12px;
   }
 
   .brand {
     font-size: 14px;
+  }
+
+  .container {
+    width: 92%;
+  }
+
+  .card {
+    padding: 18px;
   }
 }
 
@@ -1659,39 +1714,39 @@ small {
 
 <body>
 
-<div class="topbar">
+<header class="topbar">
+
+  <button
+    class="menu-btn"
+    onclick="openMenu()">
+    ☰
+  </button>
 
   <div class="brand">
     🤖 ربات ساز کانفیگ ساز رایگان
   </div>
 
   <button
-    class="menu-button"
-    onclick="toggleMenu()">
-    ☰
+    class="refresh-btn"
+    onclick="location.reload()"
+    title="بروزرسانی">
+    ↻
   </button>
 
-</div>
-
-<button
-  class="refresh-button"
-  onclick="location.reload()"
-  title="بروزرسانی">
-  🔄
-</button>
+</header>
 
 <div
   id="menuOverlay"
   class="menu-overlay"
-  onclick="toggleMenu()">
+  onclick="closeMenu()">
 </div>
 
-<div
+<aside
   id="sideMenu"
   class="side-menu">
 
   <div class="menu-title">
-    ☰ منوی مدیریت
+    🤖 منوی مدیریت
   </div>
 
   <a
@@ -1715,12 +1770,18 @@ small {
   ${
     botId
       ? `
+      <div class="menu-divider"></div>
+
+      <div class="menu-title">
+        ⚙️ مدیریت ربات
+      </div>
+
       <a
         class="menu-item"
         href="/forcejoin?bot=${encodeURIComponent(
           botId
         )}">
-        🔒 عضویت اجباری
+        🔐 عضویت اجباری
       </a>
 
       <a
@@ -1754,68 +1815,142 @@ small {
         )}">
         👥 آمار کاربران
       </a>
+
+      <a
+        class="menu-item"
+        href="/bots/${encodeURIComponent(
+          botId
+        )}">
+        🏠 صفحه ربات
+      </a>
+      `
+      : `
+      <div class="menu-divider"></div>
+
+      <div
+        class="menu-item"
+        style="opacity:.55;cursor:not-allowed">
+        🔐 عضویت اجباری
+      </div>
+
+      <div
+        class="menu-item"
+        style="opacity:.55;cursor:not-allowed">
+        📢 ارسال پیام به همه کاربران
+      </div>
+
+      <div
+        class="menu-item"
+        style="opacity:.55;cursor:not-allowed">
+        ➕ افزودن دستور
+      </div>
+
+      <div
+        class="menu-item"
+        style="opacity:.55;cursor:not-allowed">
+        ⚡ دستورات
+      </div>
+
+      <div
+        class="menu-item"
+        style="opacity:.55;cursor:not-allowed">
+        👥 آمار کاربران
+      </div>
+      `
+  }
+
+  <div class="menu-divider"></div>
+
+  <a
+    class="menu-item"
+    href="/theme/toggle">
+    🌓 تاریک / روشن
+  </a>
+
+  <a
+    class="menu-item"
+    href="/creator/login">
+    👑 ورود سازنده
+  </a>
+
+  ${
+    reqHasLoginPlaceholder()
+      ? `
+      <a
+        class="menu-item"
+        href="/logout">
+        🚪 خروج
+      </a>
       `
       : ""
   }
 
-  <a
-    class="menu-item menu-danger"
-    href="/logout">
-    🚪 خروج
-  </a>
-
-  <a
-    class="menu-item menu-creator"
-    href="/creator/login">
-    🔐 ورود سازنده
-  </a>
-
-</div>
+</aside>
 
 <div class="container">
+
 ${content}
+
 </div>
 
 <script>
 
-function toggleMenu() {
-  const menu =
-    document.getElementById(
-      "sideMenu"
-    );
+function openMenu() {
+  document
+    .getElementById("sideMenu")
+    .classList.add("open");
 
-  const overlay =
-    document.getElementById(
-      "menuOverlay"
-    );
-
-  menu.classList.toggle(
-    "open"
-  );
-
-  overlay.classList.toggle(
-    "show"
-  );
+  document
+    .getElementById("menuOverlay")
+    .classList.add("show");
 }
 
-(function() {
-  const theme =
-    localStorage.getItem(
-      "nova-theme"
-    );
+function closeMenu() {
+  document
+    .getElementById("sideMenu")
+    .classList.remove("open");
 
-  if (theme === "dark") {
-    document.body.classList.add(
-      "dark"
-    );
-  }
-})();
+  document
+    .getElementById("menuOverlay")
+    .classList.remove("show");
+}
 
 </script>
 
 </body>
 </html>
 `;
+}
+
+/*
+  برای اینکه page به session دسترسی داشته باشد،
+  این مقدار هنگام ساخت صفحه تنظیم می‌شود.
+*/
+let currentPageLogin = false;
+
+function reqHasLoginPlaceholder() {
+  return currentPageLogin;
+}
+
+function renderPage(
+  req,
+  res,
+  title,
+  content,
+  botId = ""
+) {
+  currentPageLogin =
+    !!req.session.userId;
+
+  res.send(
+    page(
+      title,
+      content,
+      botId
+    )
+  );
+
+  currentPageLogin = false;
 }
 
 /* =========================
@@ -1829,34 +1964,45 @@ app.get("/", (req, res) => {
     );
   }
 
-  res.send(
-    page(
-      "ورود",
-      `
-      <div class="hero">
-        <h1>
-          🤖 ربات ساز کانفیگ ساز رایگان
-        </h1>
+  renderPage(
+    req,
+    res,
+    "ربات ساز",
+    `
+    <div class="card hero">
 
-        <p>
-          ساخت و مدیریت ربات‌های تلگرام
-          با یک پنل ساده و حرفه‌ای.
-        </p>
+      <h1>
+        🤖 ربات ساز کانفیگ ساز رایگان
+      </h1>
+
+      <p>
+        ساخت، مدیریت و کنترل ربات‌های تلگرام
+      </p>
+
+      <div class="mobile-row">
 
         <a
           class="btn"
           href="/login">
-          ورود
+          🔐 ورود
         </a>
 
         <a
           class="btn btn-green"
           href="/register">
-          ثبت‌نام
+          📝 ثبت نام
         </a>
+
+        <a
+          class="btn btn-orange"
+          href="/creator/login">
+          👑 ورود سازنده
+        </a>
+
       </div>
-      `
-    )
+
+    </div>
+    `
   );
 });
 
@@ -1867,54 +2013,54 @@ app.get("/", (req, res) => {
 app.get(
   "/register",
   (req, res) => {
-    res.send(
-      page(
-        "ثبت نام",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "ثبت نام",
+      `
+      <div class="card">
 
-          <h2>
-            📝 ثبت نام
-          </h2>
+        <h1>
+          📝 ثبت نام
+        </h1>
 
-          <form
-            method="post"
-            action="/register">
+        <form
+          method="post"
+          action="/register">
 
-            <label>
-              نام کاربری
-            </label>
+          <label>
+            نام کاربری
+          </label>
 
-            <input
-              name="username"
-              required>
+          <input
+            name="username"
+            required>
 
-            <label>
-              رمز عبور
-            </label>
+          <label>
+            رمز عبور
+          </label>
 
-            <input
-              name="password"
-              type="password"
-              required>
+          <input
+            name="password"
+            type="password"
+            required>
 
-            <button>
-              ثبت نام
-            </button>
+          <button>
+            ثبت نام
+          </button>
 
-          </form>
+        </form>
 
-          <br>
+        <br>
 
-          <a
-            class="btn btn-gray"
-            href="/login">
-            ورود
-          </a>
+        <a
+          class="btn btn-gray"
+          href="/login">
+          ورود
+        </a>
 
-        </div>
-        `
-      )
+      </div>
+      `
     );
   }
 );
@@ -1932,62 +2078,54 @@ app.post(
         req.body.password || ""
       );
 
-    if (
-      !username ||
-      !password
-    ) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              نام کاربری و رمز عبور
-              الزامی است.
-            </div>
-
-            <a
-              class="btn"
-              href="/register">
-              بازگشت
-            </a>
-
+    if (!username || !password) {
+      return renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
+          <div class="alert error">
+            نام کاربری و رمز عبور الزامی است.
           </div>
-          `
-        )
+
+          <a
+            class="btn"
+            href="/register">
+            بازگشت
+          </a>
+        </div>
+        `
       );
     }
 
     const exists =
       db.users.some(
         user =>
-          user.username
-            .toLowerCase() ===
+          user.username.toLowerCase() ===
           username.toLowerCase()
       );
 
     if (exists) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
+      return renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
 
-            <div class="alert error">
-              این نام کاربری قبلاً
-              ثبت شده است.
-            </div>
-
-            <a
-              class="btn"
-              href="/register">
-              بازگشت
-            </a>
-
+          <div class="alert error">
+            این نام کاربری قبلاً ثبت شده است.
           </div>
-          `
-        )
+
+          <a
+            class="btn"
+            href="/register">
+            بازگشت
+          </a>
+
+        </div>
+        `
       );
     }
 
@@ -1995,23 +2133,15 @@ app.post(
       id: makeId(),
       username,
       password:
-        hashPassword(
-          password
-        ),
+        hashPassword(password),
       createdAt: Date.now()
     };
 
     db.users.push(user);
-
     saveDB();
 
     req.session.userId =
       user.id;
-
-    logActivity(
-      "panel",
-      `👤 کاربر ${username} در پنل ثبت‌نام کرد.`
-    );
 
     res.redirect(
       "/dashboard"
@@ -2026,54 +2156,54 @@ app.post(
 app.get(
   "/login",
   (req, res) => {
-    res.send(
-      page(
-        "ورود",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "ورود",
+      `
+      <div class="card">
 
-          <h2>
-            🔑 ورود
-          </h2>
+        <h1>
+          🔐 ورود
+        </h1>
 
-          <form
-            method="post"
-            action="/login">
+        <form
+          method="post"
+          action="/login">
 
-            <label>
-              نام کاربری
-            </label>
+          <label>
+            نام کاربری
+          </label>
 
-            <input
-              name="username"
-              required>
+          <input
+            name="username"
+            required>
 
-            <label>
-              رمز عبور
-            </label>
+          <label>
+            رمز عبور
+          </label>
 
-            <input
-              name="password"
-              type="password"
-              required>
+          <input
+            name="password"
+            type="password"
+            required>
 
-            <button>
-              ورود
-            </button>
+          <button>
+            ورود
+          </button>
 
-          </form>
+        </form>
 
-          <br>
+        <br>
 
-          <a
-            class="btn btn-green"
-            href="/register">
-            ثبت نام
-          </a>
+        <a
+          class="btn btn-green"
+          href="/register">
+          ثبت نام
+        </a>
 
-        </div>
-        `
-      )
+      </div>
+      `
     );
   }
 );
@@ -2094,56 +2224,43 @@ app.post(
     const user =
       db.users.find(
         item =>
-          item.username
-            .toLowerCase() ===
+          item.username.toLowerCase() ===
             username.toLowerCase() &&
           item.password ===
-            hashPassword(
-              password
-            )
+            hashPassword(password)
       );
 
     if (!user) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
+      return renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
 
-            <div class="alert error">
-              نام کاربری یا رمز عبور
-              اشتباه است.
-            </div>
-
-            <a
-              class="btn"
-              href="/login">
-              بازگشت
-            </a>
-
+          <div class="alert error">
+            نام کاربری یا رمز عبور اشتباه است.
           </div>
-          `
-        )
+
+          <a
+            class="btn"
+            href="/login">
+            بازگشت
+          </a>
+
+        </div>
+        `
       );
     }
 
     req.session.userId =
       user.id;
 
-    logActivity(
-      "panel",
-      `🔑 کاربر ${user.username} وارد پنل شد.`
-    );
-
     res.redirect(
       "/dashboard"
     );
   }
 );
-
-/* =========================
-   LOGOUT
-========================= */
 
 app.get(
   "/logout",
@@ -2157,6 +2274,24 @@ app.get(
 );
 
 /* =========================
+   THEME
+========================= */
+
+app.get(
+  "/theme/toggle",
+  requireLogin,
+  (req, res) => {
+    req.session.dark =
+      !req.session.dark;
+
+    res.redirect(
+      req.get("referer") ||
+        "/dashboard"
+    );
+  }
+);
+
+/* =========================
    DASHBOARD
 ========================= */
 
@@ -2164,52 +2299,21 @@ app.get(
   "/dashboard",
   requireLogin,
   (req, res) => {
-    const user =
-      findUser(req);
-
     const bots =
       db.bots.filter(
         bot =>
-          String(
-            bot.ownerId
-          ) ===
-          String(user.id)
+          String(bot.ownerId) ===
+          String(req.session.userId)
       );
 
-    const totalUsers =
-      bots.reduce(
-        (sum, bot) =>
-          sum +
-          Object.keys(
-            db.botUsers[
-              bot.id
-            ] || {}
-          ).length,
-        0
-      );
+    let totalUsers = 0;
 
-    const totalCommands =
-      bots.reduce(
-        (sum, bot) =>
-          sum +
-          Object.keys(
-            db.commands[
-              bot.id
-            ] || {}
-          ).length,
-        0
-      );
-
-    const totalForceJoins =
-      bots.reduce(
-        (sum, bot) =>
-          sum +
-          (
-            bot.forceJoins
-              ?.length || 0
-          ),
-        0
-      );
+    for (const bot of bots) {
+      totalUsers +=
+        Object.keys(
+          db.botUsers[bot.id] || {}
+        ).length;
+    }
 
     const activities =
       db.activity
@@ -2218,122 +2322,164 @@ app.get(
             return true;
           }
 
-          const bot =
-            bots.find(
-              b =>
-                b.id ===
-                item.botId
-            );
-
-          return !!bot;
+          return bots.some(
+            bot =>
+              bot.id ===
+              item.botId
+          );
         })
-        .slice(0, 15);
+        .slice(0, 12);
 
-    let timeline = "";
+    let activityHtml = "";
 
-    for (
-      const activity of activities
-    ) {
-      timeline += `
-        <div class="timeline-item">
+    for (const item of activities) {
+      const icon =
+        item.type === "user"
+          ? "👤"
+          : item.type === "command"
+          ? "⚡"
+          : item.type === "join"
+          ? "🔐"
+          : item.type === "broadcast"
+          ? "📢"
+          : "📌";
 
-          <div>
-            ${escapeHtml(
-              activity.text
-            )}
+      activityHtml += `
+        <div class="activity">
+
+          <div class="activity-icon">
+            ${icon}
           </div>
 
-          <small>
-            ${new Date(
-              activity.time
-            ).toLocaleString(
-              "fa-IR"
-            )}
-          </small>
+          <div>
+
+            <strong>
+              ${escapeHtml(
+                item.text
+              )}
+            </strong>
+
+            <br>
+
+            <small>
+              ${new Date(
+                item.createdAt
+              ).toLocaleString(
+                "fa-IR"
+              )}
+            </small>
+
+          </div>
 
         </div>
       `;
     }
 
-    res.send(
-      page(
-        "داشبورد",
-        `
-        <div class="hero">
+    renderPage(
+      req,
+      res,
+      "داشبورد",
+      `
+      <div class="card hero">
 
-          <h1>
-            📊 داشبورد
-          </h1>
+        <h1>
+          📊 داشبورد
+        </h1>
 
-          <p>
-            سلام
-            ${escapeHtml(
-              user.username
+        <p>
+          وضعیت کلی ربات‌های شما
+        </p>
+
+      </div>
+
+      <div class="grid">
+
+        <div class="stat">
+          🤖 ربات‌ها
+          <strong>
+            ${bots.length}
+          </strong>
+        </div>
+
+        <div class="stat">
+          👥 کاربران
+          <strong>
+            ${totalUsers}
+          </strong>
+        </div>
+
+        <div class="stat">
+          ⚡ دستورات
+          <strong>
+            ${bots.reduce(
+              (sum, bot) =>
+                sum +
+                Object.keys(
+                  db.commands[
+                    bot.id
+                  ] || {}
+                ).length,
+              0
             )}
-            👋
-          </p>
-
-          <p>
-            همه فعالیت‌های پنل و ربات‌ها
-            را از اینجا مشاهده کنید.
-          </p>
-
+          </strong>
         </div>
 
-        <div class="grid">
+        <div class="stat">
+          🔐 عضویت اجباری
+          <strong>
+            ${bots.reduce(
+              (sum, bot) =>
+                sum +
+                (
+                  bot.forceJoins
+                    ?.length || 0
+                ),
+              0
+            )}
+          </strong>
+        </div>
 
-          <div class="stat">
+      </div>
+
+      <div class="card">
+
+        <h2>
+          🎬 فعالیت‌های اخیر
+        </h2>
+
+        ${
+          activityHtml ||
+          "<p>هنوز فعالیتی ثبت نشده است.</p>"
+        }
+
+      </div>
+
+      <div class="card">
+
+        <div class="mobile-row">
+
+          <a
+            class="btn btn-green"
+            href="/bots/add">
+            ➕ افزودن ربات
+          </a>
+
+          <a
+            class="btn"
+            href="/bots">
             🤖 ربات‌ها
-            <strong>
-              ${bots.length}
-            </strong>
-          </div>
+          </a>
 
-          <div class="stat">
-            👥 کاربران
-            <strong>
-              ${totalUsers}
-            </strong>
-          </div>
-
-          <div class="stat">
-            ⚡ دستورات
-            <strong>
-              ${totalCommands}
-            </strong>
-          </div>
-
-          <div class="stat">
-            🔐 عضویت اجباری
-            <strong>
-              ${totalForceJoins}
-            </strong>
-          </div>
+          <button
+            class="btn btn-gray"
+            onclick="location.reload()">
+            ↻ بروزرسانی
+          </button>
 
         </div>
 
-        <div class="card">
-
-          <h2>
-            🎬 فعالیت‌های اخیر
-          </h2>
-
-          <div class="timeline">
-
-            ${
-              timeline ||
-              `
-              <div class="item">
-                هنوز فعالیتی ثبت نشده است.
-              </div>
-              `
-            }
-
-          </div>
-
-        </div>
-        `
-      )
+      </div>
+      `
     );
   }
 );
@@ -2349,19 +2495,15 @@ app.get(
     const bots =
       db.bots.filter(
         bot =>
-          String(
-            bot.ownerId
-          ) ===
-          String(
-            req.session.userId
-          )
+          String(bot.ownerId) ===
+          String(req.session.userId)
       );
 
     let html = `
-      <div class="card">
+      <div class="card hero">
 
         <h1>
-          🤖 ربات‌های من
+          🤖 ربات‌ها
         </h1>
 
         <a
@@ -2376,15 +2518,21 @@ app.get(
     if (bots.length === 0) {
       html += `
         <div class="card">
-          هنوز رباتی اضافه نکرده‌اید.
+          <p>
+            هنوز رباتی اضافه نکرده‌اید.
+          </p>
+
+          <a
+            class="btn btn-green"
+            href="/bots/add">
+            ➕ افزودن اولین ربات
+          </a>
         </div>
       `;
     }
 
-    for (
-      const bot of bots
-    ) {
-      const userCount =
+    for (const bot of bots) {
+      const users =
         Object.keys(
           db.botUsers[
             bot.id
@@ -2394,57 +2542,94 @@ app.get(
       html += `
         <div class="card">
 
-          <span class="badge">
-            ${escapeHtml(
-              bot.username
-                ? "@" +
-                    bot.username
-                : "ربات"
-            )}
-          </span>
-
           <h2>
-            ${escapeHtml(
+            🤖 ${escapeHtml(
               bot.name ||
                 "ربات بدون نام"
             )}
           </h2>
 
           <p>
-            👥 کاربران:
-            ${userCount}
+            @${escapeHtml(
+              bot.username ||
+                ""
+            )}
           </p>
 
-          <p>
-            🔐 عضویت اجباری:
-            ${
-              bot.forceJoins
-                ?.length || 0
-            }
-          </p>
+          <div class="grid">
 
-          <a
-            class="btn"
-            href="/bots/${bot.id}">
-            مدیریت ربات
-          </a>
+            <div class="stat">
+              👥 کاربران
+              <strong>
+                ${users}
+              </strong>
+            </div>
 
-          <a
-            class="btn btn-danger"
-            href="/bots/delete/${bot.id}"
-            onclick="return confirm('آیا از حذف ربات مطمئن هستید؟')">
-            حذف
-          </a>
+            <div class="stat">
+              ⚡ دستورات
+              <strong>
+                ${
+                  Object.keys(
+                    db.commands[
+                      bot.id
+                    ] || {}
+                  ).length
+                }
+              </strong>
+            </div>
+
+            <div class="stat">
+              🔐 عضویت
+              <strong>
+                ${
+                  bot.forceJoins
+                    ?.length || 0
+                }
+              </strong>
+            </div>
+
+          </div>
+
+          <br>
+
+          <div class="mobile-row">
+
+            <a
+              class="btn"
+              href="/bots/${bot.id}">
+              ⚙️ مدیریت
+            </a>
+
+            <a
+              class="btn btn-green"
+              href="/forcejoin?bot=${bot.id}">
+              🔐 عضویت اجباری
+            </a>
+
+            <a
+              class="btn btn-orange"
+              href="/broadcast?bot=${bot.id}">
+              📢 ارسال پیام
+            </a>
+
+            <a
+              class="btn btn-danger"
+              href="/bots/delete/${bot.id}"
+              onclick="return confirm('آیا از حذف این ربات مطمئن هستید؟')">
+              🗑 حذف
+            </a>
+
+          </div>
 
         </div>
       `;
     }
 
-    res.send(
-      page(
-        "ربات‌ها",
-        html
-      )
+    renderPage(
+      req,
+      res,
+      "ربات‌ها",
+      html
     );
   }
 );
@@ -2457,52 +2642,55 @@ app.get(
   "/bots/add",
   requireLogin,
   (req, res) => {
-    res.send(
-      page(
-        "افزودن ربات",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "افزودن ربات",
+      `
+      <div class="card hero">
 
-          <h1>
+        <h1>
+          ➕ افزودن ربات
+        </h1>
+
+        <p>
+          توکن ربات را از BotFather دریافت کنید.
+        </p>
+
+      </div>
+
+      <div class="card">
+
+        <form
+          method="post"
+          action="/bots/add">
+
+          <label>
+            نام ربات
+          </label>
+
+          <input
+            name="name"
+            placeholder="Nova Bot"
+            required>
+
+          <label>
+            توکن ربات
+          </label>
+
+          <input
+            name="token"
+            placeholder="123456789:ABC..."
+            required>
+
+          <button>
             ➕ افزودن ربات
-          </h1>
+          </button>
 
-          <div class="alert">
-            توکن ربات را از
-            BotFather دریافت کنید.
-          </div>
+        </form>
 
-          <form
-            method="post"
-            action="/bots/add">
-
-            <label>
-              نام ربات
-            </label>
-
-            <input
-              name="name"
-              placeholder="Nova Bot"
-              required>
-
-            <label>
-              توکن ربات
-            </label>
-
-            <input
-              name="token"
-              placeholder="123456:ABC..."
-              required>
-
-            <button>
-              افزودن ربات
-            </button>
-
-          </form>
-
-        </div>
-        `
-      )
+      </div>
+      `
     );
   }
 );
@@ -2522,25 +2710,17 @@ app.post(
       ).trim();
 
     if (!name || !token) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              نام و توکن الزامی است.
-            </div>
-
-            <a
-              class="btn"
-              href="/bots/add">
-              بازگشت
-            </a>
-
+      return renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
+          <div class="alert error">
+            نام و توکن الزامی است.
           </div>
-          `
-        )
+        </div>
+        `
       );
     }
 
@@ -2557,33 +2737,29 @@ app.post(
           req.session.userId,
         name,
         token,
-        telegramId:
-          me.id,
+        telegramId: me.id,
         username:
           me.username || "",
         firstName:
           me.first_name || "",
         forceJoins: [],
         forceJoinVerified: {},
-        createdAt:
-          Date.now()
+        createdAt: Date.now()
       };
 
       db.bots.push(bot);
-
       db.botUsers[
         bot.id
       ] = {};
-
       db.commands[
         bot.id
       ] = {};
 
       saveDB();
 
-      logActivity(
+      addActivity(
         "bot",
-        `🤖 ربات «${name}» اضافه شد.`,
+        `ربات ${name} اضافه شد.`,
         bot.id
       );
 
@@ -2593,31 +2769,172 @@ app.post(
         `/bots/${bot.id}`
       );
     } catch (error) {
-      res.send(
-        page(
-          "خطای توکن",
-          `
-          <div class="card">
+      renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
 
-            <div class="alert error">
-              توکن ربات معتبر نیست.
-              <br><br>
-              ${escapeHtml(
-                error.message
-              )}
-            </div>
+          <div class="alert error">
 
-            <a
-              class="btn"
-              href="/bots/add">
-              بازگشت
-            </a>
+            ❌ توکن ربات معتبر نیست.
+
+            <br><br>
+
+            ${escapeHtml(
+              error.message
+            )}
 
           </div>
-          `
-        )
+
+          <a
+            class="btn"
+            href="/bots/add">
+            بازگشت
+          </a>
+
+        </div>
+        `
       );
     }
+  }
+);
+
+/* =========================
+   BOT PAGE
+========================= */
+
+app.get(
+  "/bots/:id",
+  requireLogin,
+  (req, res) => {
+    const bot =
+      db.bots.find(
+        item =>
+          item.id ===
+            req.params.id &&
+          String(
+            item.ownerId
+          ) ===
+            String(
+              req.session.userId
+            )
+      );
+
+    if (!bot) {
+      return res.status(404).send(
+        "Bot not found"
+      );
+    }
+
+    const users =
+      Object.keys(
+        db.botUsers[
+          bot.id
+        ] || {}
+      ).length;
+
+    const commands =
+      Object.keys(
+        db.commands[
+          bot.id
+        ] || {}
+      ).length;
+
+    const joins =
+      bot.forceJoins
+        ?.length || 0;
+
+    renderPage(
+      req,
+      res,
+      bot.name,
+      `
+      <div class="card hero">
+
+        <h1>
+          🤖 ${escapeHtml(
+            bot.name
+          )}
+        </h1>
+
+        <p>
+          @${escapeHtml(
+            bot.username
+          )}
+        </p>
+
+      </div>
+
+      <div class="grid">
+
+        <div class="stat">
+          👥 کاربران
+          <strong>
+            ${users}
+          </strong>
+        </div>
+
+        <div class="stat">
+          ⚡ دستورات
+          <strong>
+            ${commands}
+          </strong>
+        </div>
+
+        <div class="stat">
+          🔐 عضویت اجباری
+          <strong>
+            ${joins}
+          </strong>
+        </div>
+
+      </div>
+
+      <div class="card">
+
+        <h2>
+          ⚙️ مدیریت ربات
+        </h2>
+
+        <div class="mobile-row">
+
+          <a
+            class="btn btn-green"
+            href="/forcejoin?bot=${bot.id}">
+            🔐 عضویت اجباری
+          </a>
+
+          <a
+            class="btn btn-orange"
+            href="/broadcast?bot=${bot.id}">
+            📢 ارسال پیام به همه کاربران
+          </a>
+
+          <a
+            class="btn"
+            href="/commands/add?bot=${bot.id}">
+            ➕ افزودن دستور
+          </a>
+
+          <a
+            class="btn"
+            href="/commands?bot=${bot.id}">
+            ⚡ دستورات
+          </a>
+
+          <a
+            class="btn"
+            href="/users?bot=${bot.id}">
+            👥 آمار کاربران
+          </a>
+
+        </div>
+
+      </div>
+      `
+    );
   }
 );
 
@@ -2643,9 +2960,9 @@ app.get(
       );
 
     if (index === -1) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
     const bot =
@@ -2670,151 +2987,13 @@ app.get(
 
     saveDB();
 
-    logActivity(
+    addActivity(
       "bot",
-      `🗑️ ربات «${bot.name}» حذف شد.`
+      `ربات ${bot.name} حذف شد.`
     );
 
     res.redirect(
       "/bots"
-    );
-  }
-);
-
-/* =========================
-   BOT MAIN PAGE
-========================= */
-
-app.get(
-  "/bots/:id",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      db.bots.find(
-        item =>
-          item.id ===
-            req.params.id &&
-          String(
-            item.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
-      );
-
-    if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
-    }
-
-    ensureForceJoinState(
-      bot
-    );
-
-    const commands =
-      db.commands[
-        bot.id
-      ] || {};
-
-    const users =
-      db.botUsers[
-        bot.id
-      ] || {};
-
-    res.send(
-      page(
-        bot.name,
-        `
-        <div class="hero">
-
-          <h1>
-            🤖 ${escapeHtml(
-              bot.name
-            )}
-          </h1>
-
-          <p>
-            ${
-              bot.username
-                ? "@" +
-                  escapeHtml(
-                    bot.username
-                  )
-                : ""
-            }
-          </p>
-
-        </div>
-
-        <div class="grid">
-
-          <div class="stat">
-            👥 کاربران
-            <strong>
-              ${Object.keys(
-                users
-              ).length}
-            </strong>
-          </div>
-
-          <div class="stat">
-            ⚡ دستورات
-            <strong>
-              ${Object.keys(
-                commands
-              ).length}
-            </strong>
-          </div>
-
-          <div class="stat">
-            🔐 عضویت اجباری
-            <strong>
-              ${bot.forceJoins.length}
-            </strong>
-          </div>
-
-        </div>
-
-        <div class="card">
-
-          <h2>
-            مدیریت بخش‌های ربات
-          </h2>
-
-          <a
-            class="btn"
-            href="/commands?bot=${bot.id}">
-            ⚡ دستورات
-          </a>
-
-          <a
-            class="btn btn-green"
-            href="/commands/add?bot=${bot.id}">
-            ➕ افزودن دستور
-          </a>
-
-          <a
-            class="btn btn-orange"
-            href="/forcejoin?bot=${bot.id}">
-            🔐 عضویت اجباری
-          </a>
-
-          <a
-            class="btn"
-            href="/users?bot=${bot.id}">
-            👥 کاربران
-          </a>
-
-          <a
-            class="btn btn-green"
-            href="/broadcast?bot=${bot.id}">
-            📢 ارسال به همه
-          </a>
-
-        </div>
-        `
-      )
     );
   }
 );
@@ -2831,9 +3010,9 @@ app.get(
       findBot(req);
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
     ensureForceJoinState(
@@ -2854,12 +3033,12 @@ app.get(
       list += `
         <div class="item">
 
-          <strong>
+          <h3>
             📢 ${escapeHtml(
               join.title ||
                 join.username
             )}
-          </strong>
+          </h3>
 
           <p>
             ${escapeHtml(
@@ -2867,83 +3046,108 @@ app.get(
             )}
           </p>
 
+          <span class="badge">
+            ${escapeHtml(
+              join.type ||
+                "channel"
+            )}
+          </span>
+
+          <br><br>
+
           <a
             class="btn btn-danger"
             href="/forcejoin/delete?bot=${bot.id}&index=${i}"
-            onclick="return confirm('حذف شود؟')">
-            حذف
+            onclick="return confirm('این مورد حذف شود؟')">
+            🗑 حذف
           </a>
 
         </div>
       `;
     }
 
-    res.send(
-      page(
-        "عضویت اجباری",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "عضویت اجباری",
+      `
+      <div class="card hero">
 
-          <h1>
-            🔐 عضویت اجباری
-          </h1>
+        <h1>
+          🔐 عضویت اجباری
+        </h1>
 
-          <div class="alert">
-            این قابلیت فقط هنگام
-            <strong>/start</strong>
-            اجرا می‌شود.
-            <br><br>
-            کاربر بعد از تأیید موفق،
-            برای همان مورد دوباره
-            درخواست عضویت نمی‌گیرد.
-          </div>
+        <p>
+          این قابلیت فقط هنگام اجرای /start بررسی می‌شود.
+        </p>
 
-          <form
-            method="post"
-            action="/forcejoin/add">
+      </div>
 
-            <input
-              type="hidden"
-              name="bot"
-              value="${escapeHtml(
-                bot.id
-              )}">
+      <div class="card">
 
-            <label>
-              لینک عمومی کانال یا گروه
-            </label>
+        <div class="alert">
 
-            <input
-              name="link"
-              placeholder="https://t.me/example"
-              required>
+          ⚠️ ربات باید در کانال یا گروه
+          <strong>ادمین</strong> باشد.
 
-            <button>
-              ➕ افزودن
-            </button>
+          <br><br>
 
-          </form>
+          فقط لینک عمومی مثل:
+          <br>
+
+          https://t.me/example
 
         </div>
 
-        <div class="card">
+        <form
+          method="post"
+          action="/forcejoin/add">
 
-          <h2>
-            موارد فعال
-          </h2>
+          <input
+            type="hidden"
+            name="bot"
+            value="${escapeHtml(
+              bot.id
+            )}">
 
-          ${
-            list ||
-            "<p>عضویت اجباری تنظیم نشده است.</p>"
-          }
+          <label>
+            لینک کانال یا گروه
+          </label>
 
-        </div>
-        `
-      ),
+          <input
+            name="link"
+            placeholder="https://t.me/example"
+            required>
+
+          <button>
+            ➕ افزودن
+          </button>
+
+        </form>
+
+      </div>
+
+      <div class="card">
+
+        <h2>
+          موارد فعال
+        </h2>
+
+        ${
+          list ||
+          "<p>عضویت اجباری فعال نیست.</p>"
+        }
+
+      </div>
+      `,
       bot.id
     );
   }
 );
+
+/* =========================
+   ADD FORCE JOIN
+========================= */
 
 app.post(
   "/forcejoin/add",
@@ -2962,7 +3166,8 @@ app.post(
     const bot =
       db.bots.find(
         item =>
-          item.id === botId &&
+          item.id ===
+            botId &&
           String(
             item.ownerId
           ) ===
@@ -2972,9 +3177,9 @@ app.post(
       );
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
     ensureForceJoinState(
@@ -2985,26 +3190,18 @@ app.post(
       bot.forceJoins.length >=
       5
     ) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              حداکثر ۵ مورد قابل تنظیم است.
-            </div>
-
-            <a
-              class="btn"
-              href="/forcejoin?bot=${bot.id}">
-              بازگشت
-            </a>
-
+      return renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
+          <div class="alert error">
+            حداکثر ۵ کانال یا گروه قابل تنظیم است.
           </div>
-          `,
-          bot.id
-        )
+        </div>
+        `,
+        bot.id
       );
     }
 
@@ -3067,7 +3264,7 @@ app.post(
         );
       }
 
-      const join = {
+      bot.forceJoins.push({
         id: makeId(),
         username:
           parsed.username,
@@ -3080,17 +3277,13 @@ app.post(
           chat.type,
         addedAt:
           Date.now()
-      };
-
-      bot.forceJoins.push(
-        join
-      );
+      });
 
       saveDB();
 
-      logActivity(
-        "forcejoin",
-        `🔐 عضویت اجباری «${join.title}» برای ربات «${bot.name}» فعال شد.`,
+      addActivity(
+        "join",
+        `عضویت اجباری ${chat.title || parsed.username} اضافه شد.`,
         bot.id
       );
 
@@ -3098,32 +3291,36 @@ app.post(
         `/forcejoin?bot=${bot.id}`
       );
     } catch (error) {
-      res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
+      renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
 
-            <div class="alert error">
-              ${escapeHtml(
-                error.message
-              )}
-            </div>
-
-            <a
-              class="btn"
-              href="/forcejoin?bot=${bot.id}">
-              بازگشت
-            </a>
-
+          <div class="alert error">
+            ${escapeHtml(
+              error.message
+            )}
           </div>
-          `,
-          bot.id
-        )
+
+          <a
+            class="btn"
+            href="/forcejoin?bot=${bot.id}">
+            بازگشت
+          </a>
+
+        </div>
+        `,
+        bot.id
       );
     }
   }
 );
+
+/* =========================
+   DELETE FORCE JOIN
+========================= */
 
 app.get(
   "/forcejoin/delete",
@@ -3134,8 +3331,7 @@ app.get(
         item =>
           item.id ===
             String(
-              req.query.bot ||
-                ""
+              req.query.bot || ""
             ) &&
           String(
             item.ownerId
@@ -3146,9 +3342,9 @@ app.get(
       );
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
     ensureForceJoinState(
@@ -3161,24 +3357,15 @@ app.get(
       );
 
     if (
-      !Number.isInteger(
-        index
-      ) ||
+      !Number.isInteger(index) ||
       index < 0 ||
       index >=
         bot.forceJoins.length
     ) {
-      return res
-        .status(400)
-        .send(
-          "Invalid index"
-        );
+      return res.status(400).send(
+        "Invalid index"
+      );
     }
-
-    const removed =
-      bot.forceJoins[
-        index
-      ];
 
     bot.forceJoins.splice(
       index,
@@ -3186,12 +3373,6 @@ app.get(
     );
 
     saveDB();
-
-    logActivity(
-      "forcejoin",
-      `🗑️ عضویت اجباری «${removed.title || removed.username}» حذف شد.`,
-      bot.id
-    );
 
     res.redirect(
       `/forcejoin?bot=${bot.id}`
@@ -3211,9 +3392,9 @@ app.get(
       findBot(req);
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
     const commands =
@@ -3223,11 +3404,9 @@ app.get(
 
     let list = "";
 
-    for (
-      const name of Object.keys(
-        commands
-      )
-    ) {
+    for (const name of Object.keys(
+      commands
+    )) {
       const command =
         commands[name];
 
@@ -3255,44 +3434,46 @@ app.get(
 
           <a
             class="btn btn-danger"
-            href="/commands/delete?bot=${bot.id}&command=${encodeURIComponent(name)}"
+            href="/commands/delete?bot=${bot.id}&command=${encodeURIComponent(
+              name
+            )}"
             onclick="return confirm('این دستور حذف شود؟')">
-            حذف
+            🗑 حذف
           </a>
 
         </div>
       `;
     }
 
-    res.send(
-      page(
-        "دستورات",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "دستورات",
+      `
+      <div class="card hero">
 
-          <h1>
-            ⚡ دستورات
-          </h1>
+        <h1>
+          ⚡ دستورات
+        </h1>
 
-          <a
-            class="btn btn-green"
-            href="/commands/add?bot=${bot.id}">
-            ➕ افزودن دستور
-          </a>
+        <a
+          class="btn btn-green"
+          href="/commands/add?bot=${bot.id}">
+          ➕ افزودن دستور
+        </a>
 
-        </div>
+      </div>
 
-        <div class="card">
+      <div class="card">
 
-          ${
-            list ||
-            "<p>هنوز دستوری اضافه نشده است.</p>"
-          }
+        ${
+          list ||
+          "<p>هنوز دستوری ثبت نشده است.</p>"
+        }
 
-        </div>
-        `,
-        bot.id
-      )
+      </div>
+      `,
+      bot.id
     );
   }
 );
@@ -3309,60 +3490,64 @@ app.get(
       findBot(req);
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
-    res.send(
-      page(
-        "افزودن دستور",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "افزودن دستور",
+      `
+      <div class="card hero">
 
-          <h1>
-            ➕ افزودن دستور
-          </h1>
+        <h1>
+          ➕ افزودن دستور
+        </h1>
 
-          <form
-            method="post"
-            action="/commands/add">
+      </div>
 
-            <input
-              type="hidden"
-              name="bot"
-              value="${escapeHtml(
-                bot.id
-              )}">
+      <div class="card">
 
-            <label>
-              نام دستور بدون /
-            </label>
+        <form
+          method="post"
+          action="/commands/add">
 
-            <input
-              name="command"
-              placeholder="start"
-              required>
+          <input
+            type="hidden"
+            name="bot"
+            value="${escapeHtml(
+              bot.id
+            )}">
 
-            <label>
-              پاسخ ربات
-            </label>
+          <label>
+            نام دستور بدون /
+          </label>
 
-            <textarea
-              name="response"
-              placeholder="متن پاسخ ربات..."
-              required></textarea>
+          <input
+            name="command"
+            placeholder="start"
+            required>
 
-            <button>
-              💾 ذخیره دستور
-            </button>
+          <label>
+            پاسخ ربات
+          </label>
 
-          </form>
+          <textarea
+            name="response"
+            placeholder="سلام 👋"
+            required></textarea>
 
-        </div>
-        `,
-        bot.id
-      )
+          <button>
+            💾 ذخیره دستور
+          </button>
+
+        </form>
+
+      </div>
+      `,
+      bot.id
     );
   }
 );
@@ -3378,14 +3563,10 @@ app.post(
 
     const command =
       String(
-        req.body.command ||
-          ""
+        req.body.command || ""
       )
         .trim()
-        .replace(
-          /^\/+/,
-          ""
-        )
+        .replace(/^\/+/, "")
         .replace(
           /[^a-zA-Z0-9_]/g,
           ""
@@ -3393,8 +3574,7 @@ app.post(
 
     const response =
       String(
-        req.body.response ||
-          ""
+        req.body.response || ""
       );
 
     const bot =
@@ -3411,40 +3591,28 @@ app.post(
       );
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
-    }
-
-    if (!command) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              نام دستور نامعتبر است.
-            </div>
-
-            <a
-              class="btn"
-              href="/commands/add?bot=${bot.id}">
-              بازگشت
-            </a>
-
-          </div>
-          `,
-          bot.id
-        )
+      return res.status(404).send(
+        "Bot not found"
       );
     }
 
-    if (
-      !db.commands[
+    if (!command) {
+      return renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
+          <div class="alert error">
+            نام دستور نامعتبر است.
+          </div>
+        </div>
+        `,
         bot.id
-      ]
-    ) {
+      );
+    }
+
+    if (!db.commands[bot.id]) {
       db.commands[
         bot.id
       ] = {};
@@ -3460,9 +3628,9 @@ app.post(
 
     saveDB();
 
-    logActivity(
+    addActivity(
       "command",
-      `➕ دستور /${command} برای ربات «${bot.name}» اضافه شد.`,
+      `دستور /${command} برای ${bot.name} ساخته شد.`,
       bot.id
     );
 
@@ -3505,9 +3673,9 @@ app.get(
       );
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
     if (
@@ -3522,12 +3690,6 @@ app.get(
 
     saveDB();
 
-    logActivity(
-      "command",
-      `🗑️ دستور /${command} از ربات «${bot.name}» حذف شد.`,
-      bot.id
-    );
-
     res.redirect(
       `/commands?bot=${bot.id}`
     );
@@ -3535,7 +3697,7 @@ app.get(
 );
 
 /* =========================
-   USERS / STATISTICS
+   USERS
 ========================= */
 
 app.get(
@@ -3546,9 +3708,9 @@ app.get(
       findBot(req);
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
     const users =
@@ -3556,20 +3718,15 @@ app.get(
         bot.id
       ] || {};
 
-    const userArray =
-      Object.values(users)
-        .sort(
-          (a, b) =>
-            (b.updatedAt || 0) -
-            (a.updatedAt || 0)
-        );
-
     let list = "";
 
-    for (
-      const user of userArray
-    ) {
-      const fullName =
+    for (const key of Object.keys(
+      users
+    )) {
+      const user =
+        users[key];
+
+      const name =
         [
           user.first_name,
           user.last_name
@@ -3579,32 +3736,34 @@ app.get(
         "بدون نام";
 
       list += `
-        <div class="timeline-item">
+        <div class="item">
 
-          <strong>
+          <h3>
             👤 ${escapeHtml(
-              fullName
+              name
             )}
-          </strong>
+          </h3>
+
+          <p>
+            Telegram ID:
+            ${escapeHtml(
+              user.id
+            )}
+          </p>
 
           ${
             user.username
               ? `
-              <p>
-                @${escapeHtml(
-                  user.username
-                )}
-              </p>
+                <p>
+                  @${escapeHtml(
+                    user.username
+                  )}
+                </p>
               `
               : ""
           }
 
           <small>
-            ID:
-            ${escapeHtml(
-              user.id
-            )}
-            <br>
             آخرین فعالیت:
             ${new Date(
               user.updatedAt
@@ -3617,95 +3776,54 @@ app.get(
       `;
     }
 
-    res.send(
-      page(
-        "آمار کاربران",
-        `
-        <div class="hero">
+    renderPage(
+      req,
+      res,
+      "آمار کاربران",
+      `
+      <div class="card hero">
 
-          <h1>
-            👥 آمار کاربران
-          </h1>
+        <h1>
+          👥 آمار کاربران
+        </h1>
 
-          <p>
-            ربات:
-            ${escapeHtml(
-              bot.name
-            )}
-          </p>
+        <p>
+          ${escapeHtml(
+            bot.name
+          )}
+        </p>
 
+      </div>
+
+      <div class="grid">
+
+        <div class="stat">
+          👥 کل کاربران
+          <strong>
+            ${Object.keys(
+              users
+            ).length}
+          </strong>
         </div>
 
-        <div class="grid">
+      </div>
 
-          <div class="stat">
-            👥 کل کاربران
-            <strong>
-              ${userArray.length}
-            </strong>
-          </div>
+      <div class="card">
 
-          <div class="stat">
-            🟢 کاربران فعال
-            <strong>
-              ${userArray.filter(
-                u =>
-                  Date.now() -
-                    (u.updatedAt ||
-                      0) <
-                  24 *
-                    60 *
-                    60 *
-                    1000
-              ).length}
-            </strong>
-          </div>
+        ${
+          list ||
+          "<p>هنوز کاربری وارد ربات نشده است.</p>"
+        }
 
-          <div class="stat">
-            📅 کاربران هفته
-            <strong>
-              ${userArray.filter(
-                u =>
-                  Date.now() -
-                    (u.createdAt ||
-                      0) <
-                  7 *
-                    24 *
-                    60 *
-                    60 *
-                    1000
-              ).length}
-            </strong>
-          </div>
-
-        </div>
-
-        <div class="card">
-
-          <h2>
-            🎬 فید کاربران
-          </h2>
-
-          <div class="timeline">
-
-            ${
-              list ||
-              "<p>هنوز کاربری وارد ربات نشده است.</p>"
-            }
-
-          </div>
-
-        </div>
-        `,
-        bot.id
-      )
+      </div>
+      `,
+      bot.id
     );
   }
 );
 
 /* =========================
    BROADCAST
-   TEXT + PHOTO + VIDEO
 ========================= */
 
 app.get(
@@ -3716,191 +3834,138 @@ app.get(
       findBot(req);
 
     if (!bot) {
-      return res
-        .status(404)
-        .send("Bot not found");
+      return res.status(404).send(
+        "Bot not found"
+      );
     }
 
-    const userCount =
+    const count =
       Object.keys(
         db.botUsers[
           bot.id
         ] || {}
       ).length;
 
-    res.send(
-      page(
-        "ارسال پیام",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "ارسال پیام",
+      `
+      <div class="card hero">
 
-          <h1>
-            📢 ارسال پیام به همه کاربران
-          </h1>
+        <h1>
+          📢 ارسال پیام به همه کاربران
+        </h1>
 
-          <div class="alert">
-            تعداد دریافت‌کنندگان:
-            <strong>
-              ${userCount}
-            </strong>
-            <br><br>
-            می‌توانید متن، عکس یا ویدیو
-            ارسال کنید.
-          </div>
+        <p>
+          تعداد کاربران:
+          ${count}
+        </p>
 
-          <form
-            method="post"
-            action="/broadcast"
-            enctype="multipart/form-data">
+      </div>
 
-            <input
-              type="hidden"
-              name="bot"
-              value="${escapeHtml(
-                bot.id
-              )}">
+      <div class="card">
 
-            <label>
-              نوع پیام
-            </label>
-
-            <select
-              name="type"
-              id="broadcastType"
-              onchange="changeBroadcastType()">
-
-              <option value="text">
-                📝 متن
-              </option>
-
-              <option value="photo">
-                🖼️ عکس
-              </option>
-
-              <option value="video">
-                🎥 ویدیو
-              </option>
-
-            </select>
-
-            <div id="textBox">
-
-              <label>
-                متن پیام
-              </label>
-
-              <textarea
-                name="text"
-                placeholder="متن پیام برای کاربران..."></textarea>
-
-            </div>
-
-            <div
-              id="fileBox"
-              style="display:none">
-
-              <label>
-                فایل عکس یا ویدیو
-              </label>
-
-              <input
-                type="file"
-                name="media"
-                accept="image/*,video/*">
-
-              <label>
-                کپشن
-              </label>
-
-              <textarea
-                name="caption"
-                placeholder="کپشن..."></textarea>
-
-            </div>
-
-            <button>
-              📢 ارسال به همه کاربران
-            </button>
-
-          </form>
-
+        <div class="alert">
+          برای عکس و ویدیو، لینک مستقیم فایل یا
+          file_id تلگرام را وارد کنید.
         </div>
 
-        <script>
+        <form
+          method="post"
+          action="/broadcast">
 
-        function changeBroadcastType() {
+          <input
+            type="hidden"
+            name="bot"
+            value="${escapeHtml(
+              bot.id
+            )}">
 
-          const type =
-            document.getElementById(
-              "broadcastType"
-            ).value;
+          <label>
+            نوع پیام
+          </label>
 
-          const textBox =
-            document.getElementById(
-              "textBox"
-            );
+          <select
+            name="type"
+            onchange="toggleMedia(this.value)">
 
-          const fileBox =
-            document.getElementById(
-              "fileBox"
-            );
+            <option value="text">
+              📝 متن
+            </option>
 
-          if (type === "text") {
-            textBox.style.display =
-              "block";
+            <option value="photo">
+              🖼 عکس
+            </option>
 
-            fileBox.style.display =
-              "none";
-          } else {
-            textBox.style.display =
-              "none";
+            <option value="video">
+              🎬 ویدیو
+            </option>
 
-            fileBox.style.display =
-              "block";
-          }
+          </select>
 
-        }
+          <div id="mediaBox"
+               style="display:none">
 
-        </script>
-        `,
-        bot.id
-      )
+            <label>
+              لینک مستقیم فایل یا file_id
+            </label>
+
+            <input
+              name="media"
+              placeholder="https://example.com/file.mp4">
+
+          </div>
+
+          <label>
+            متن پیام / کپشن
+          </label>
+
+          <textarea
+            name="text"
+            placeholder="پیام شما..."></textarea>
+
+          <button
+            class="btn-orange">
+            📢 ارسال به همه کاربران
+          </button>
+
+        </form>
+
+      </div>
+
+      <script>
+
+      function toggleMedia(type) {
+
+        document.getElementById(
+          "mediaBox"
+        ).style.display =
+          type === "text"
+            ? "none"
+            : "block";
+
+      }
+
+      </script>
+      `,
+      bot.id
     );
   }
 );
 
+/* =========================
+   SEND BROADCAST
+========================= */
+
 app.post(
   "/broadcast",
   requireLogin,
-  upload.single("media"),
   async (req, res) => {
-    const bot =
-      db.bots.find(
-        item =>
-          item.id ===
-            String(
-              req.body.bot ||
-                ""
-            ) &&
-          String(
-            item.ownerId
-          ) ===
-            String(
-              req.session.userId
-            )
+    const botId =
+      String(
+        req.body.bot || ""
       );
-
-    if (!bot) {
-      if (req.file) {
-        fs.unlinkSync(
-          req.file.path
-        );
-      }
-
-      return res
-        .status(404)
-        .send("Bot not found");
-    }
 
     const type =
       String(
@@ -3910,163 +3975,86 @@ app.post(
 
     const text =
       String(
-        req.body.text ||
-          ""
+        req.body.text || ""
       );
 
-    const caption =
+    const media =
       String(
-        req.body.caption ||
-          ""
+        req.body.media || ""
+      ).trim();
+
+    const bot =
+      db.bots.find(
+        item =>
+          item.id ===
+            botId &&
+          String(
+            item.ownerId
+          ) ===
+            String(
+              req.session.userId
+            )
       );
+
+    if (!bot) {
+      return res.status(404).send(
+        "Bot not found"
+      );
+    }
 
     const users =
       db.botUsers[
         bot.id
       ] || {};
 
-    const userIds =
+    const ids =
       Object.keys(users);
 
     let success = 0;
     let failed = 0;
 
-    if (
-      type === "text" &&
-      !text.trim()
-    ) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              متن پیام را وارد کنید.
-            </div>
-
-            <a
-              class="btn"
-              href="/broadcast?bot=${bot.id}">
-              بازگشت
-            </a>
-
-          </div>
-          `,
-          bot.id
-        )
-      );
-    }
-
-    if (
-      (type === "photo" ||
-        type === "video") &&
-      !req.file
-    ) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              فایل را انتخاب کنید.
-            </div>
-
-            <a
-              class="btn"
-              href="/broadcast?bot=${bot.id}">
-              بازگشت
-            </a>
-
-          </div>
-          `,
-          bot.id
-        )
-      );
-    }
-
-    for (
-      const userId of userIds
-    ) {
+    for (const chatId of ids) {
       try {
-        if (type === "text") {
-          await telegram(
-            bot.token,
-            "sendMessage",
-            {
-              chat_id:
-                userId,
-              text
-            }
+        if (type === "photo") {
+          if (!media) {
+            throw new Error(
+              "لینک عکس یا file_id وارد نشده است."
+            );
+          }
+
+          await sendTelegramPhoto(
+            bot,
+            chatId,
+            media,
+            text
+          );
+        } else if (
+          type === "video"
+        ) {
+          if (!media) {
+            throw new Error(
+              "لینک ویدیو یا file_id وارد نشده است."
+            );
+          }
+
+          await sendTelegramVideo(
+            bot,
+            chatId,
+            media,
+            text
           );
         } else {
-          const fileBuffer =
-            fs.readFileSync(
-              req.file.path
-            );
-
-          const blob =
-            new Blob(
-              [
-                fileBuffer
-              ],
-              {
-                type:
-                  req.file.mimetype
-              }
-            );
-
-          const form =
-            new FormData();
-
-          form.append(
-            "chat_id",
-            userId
-          );
-
-          form.append(
-            type === "photo"
-              ? "photo"
-              : "video",
-            blob,
-            req.file.originalname
-          );
-
-          if (
-            caption.trim()
-          ) {
-            form.append(
-              "caption",
-              caption
-            );
-          }
-
-          const response =
-            await fetch(
-              telegramUrl(
-                bot.token,
-                type ===
-                  "photo"
-                  ? "sendPhoto"
-                  : "sendVideo"
-              ),
-              {
-                method:
-                  "POST",
-                body: form
-              }
-            );
-
-          const data =
-            await response.json();
-
-          if (!data.ok) {
+          if (!text) {
             throw new Error(
-              data.description ||
-                "ارسال ناموفق"
+              "متن پیام خالی است."
             );
           }
+
+          await sendTelegramMessage(
+            bot,
+            chatId,
+            text
+          );
         }
 
         success++;
@@ -4075,139 +4063,60 @@ app.post(
           resolve =>
             setTimeout(
               resolve,
-              40
+              60
             )
         );
       } catch (error) {
         failed++;
-
-        console.error(
-          "Broadcast error:",
-          error.message
-        );
       }
     }
 
-    if (req.file) {
-      try {
-        fs.unlinkSync(
-          req.file.path
-        );
-      } catch {}
-    }
-
-    logActivity(
+    addActivity(
       "broadcast",
-      `📢 ارسال ${type === "text" ? "متن" : type === "photo" ? "عکس" : "ویدیو"} به ${success} کاربر در ربات «${bot.name}» انجام شد.`,
+      `پیام همگانی برای ${success} کاربر ارسال شد. ناموفق: ${failed}`,
       bot.id
     );
 
-    res.send(
-      page(
-        "نتیجه ارسال",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "نتیجه ارسال",
+      `
+      <div class="card">
 
-          <h1>
-            📢 نتیجه ارسال
-          </h1>
+        <h1>
+          📢 نتیجه ارسال
+        </h1>
 
-          <div class="grid">
+        <div class="grid">
 
-            <div class="stat">
-              ✅ موفق
-              <strong>
-                ${success}
-              </strong>
-            </div>
-
-            <div class="stat">
-              ❌ ناموفق
-              <strong>
-                ${failed}
-              </strong>
-            </div>
-
+          <div class="stat">
+            ✅ موفق
+            <strong>
+              ${success}
+            </strong>
           </div>
 
-          <br>
-
-          <a
-            class="btn"
-            href="/broadcast?bot=${bot.id}">
-            بازگشت
-          </a>
-
-        </div>
-        `,
-        bot.id
-      )
-    );
-  }
-);
-
-/* =========================
-   SETTINGS
-========================= */
-
-app.get(
-  "/settings",
-  requireLogin,
-  (req, res) => {
-    const bot =
-      findBot(req);
-
-    res.send(
-      page(
-        "تنظیمات",
-        `
-        <div class="card">
-
-          <h1>
-            ⚙️ تنظیمات ظاهر
-          </h1>
-
-          <p>
-            انتخاب حالت صفحه:
-          </p>
-
-          <button
-            onclick="setTheme('light')">
-            ☀️ روشن
-          </button>
-
-          <button
-            onclick="setTheme('dark')">
-            🌙 تاریک
-          </button>
+          <div class="stat">
+            ❌ ناموفق
+            <strong>
+              ${failed}
+            </strong>
+          </div>
 
         </div>
 
-        <script>
+        <br>
 
-        function setTheme(theme) {
+        <a
+          class="btn"
+          href="/broadcast?bot=${bot.id}">
+          بازگشت
+        </a>
 
-          if (theme === "dark") {
-            document.body.classList.add(
-              "dark"
-            );
-          } else {
-            document.body.classList.remove(
-              "dark"
-            );
-          }
-
-          localStorage.setItem(
-            "nova-theme",
-            theme
-          );
-
-        }
-
-        </script>
-        `,
-        bot?.id || ""
-      )
+      </div>
+      `,
+      bot.id
     );
   }
 );
@@ -4219,39 +4128,46 @@ app.get(
 app.get(
   "/creator/login",
   (req, res) => {
-    res.send(
-      page(
-        "ورود سازنده",
-        `
-        <div class="card">
+    renderPage(
+      req,
+      res,
+      "ورود سازنده",
+      `
+      <div class="card hero">
 
-          <h1>
-            🔐 ورود سازنده
-          </h1>
+        <h1>
+          👑 ورود سازنده
+        </h1>
 
-          <form
-            method="post"
-            action="/creator/login">
+        <p>
+          دسترسی مدیریت اصلی سیستم
+        </p>
 
-            <label>
-              رمز سازنده
-            </label>
+      </div>
 
-            <input
-              name="password"
-              type="password"
-              placeholder="رمز سازنده"
-              required>
+      <div class="card">
 
-            <button>
-              🔐 ورود
-            </button>
+        <form
+          method="post"
+          action="/creator/login">
 
-          </form>
+          <label>
+            رمز سازنده
+          </label>
 
-        </div>
-        `
-      )
+          <input
+            name="password"
+            type="password"
+            required>
+
+          <button>
+            👑 ورود سازنده
+          </button>
+
+        </form>
+
+      </div>
+      `
     );
   }
 );
@@ -4261,33 +4177,32 @@ app.post(
   (req, res) => {
     const password =
       String(
-        req.body.password ||
-          ""
+        req.body.password || ""
       );
 
     if (
       password !==
       ADMIN_PASSWORD
     ) {
-      return res.send(
-        page(
-          "خطا",
-          `
-          <div class="card">
+      return renderPage(
+        req,
+        res,
+        "خطا",
+        `
+        <div class="card">
 
-            <div class="alert error">
-              رمز سازنده اشتباه است.
-            </div>
-
-            <a
-              class="btn"
-              href="/creator/login">
-              بازگشت
-            </a>
-
+          <div class="alert error">
+            ❌ رمز سازنده اشتباه است.
           </div>
-          `
-        )
+
+          <a
+            class="btn"
+            href="/creator/login">
+            بازگشت
+          </a>
+
+        </div>
+        `
       );
     }
 
@@ -4308,11 +4223,20 @@ app.get(
   "/creator",
   requireCreator,
   (req, res) => {
+    let totalBotUsers = 0;
+
+    for (const bot of db.bots) {
+      totalBotUsers +=
+        Object.keys(
+          db.botUsers[
+            bot.id
+          ] || {}
+        ).length;
+    }
+
     let bots = "";
 
-    for (
-      const bot of db.bots
-    ) {
+    for (const bot of db.bots) {
       bots += `
         <div class="item">
 
@@ -4323,22 +4247,9 @@ app.get(
           </h3>
 
           <p>
-            مالک:
-            ${escapeHtml(
-              bot.ownerId
-            )}
-          </p>
-
-          <p>
-            یوزرنیم:
-            ${
+            @${escapeHtml(
               bot.username
-                ? "@" +
-                  escapeHtml(
-                    bot.username
-                  )
-                : "-"
-            }
+            )}
           </p>
 
           <p>
@@ -4360,91 +4271,74 @@ app.get(
             }
           </p>
 
-          <p>
-            ⚡ دستورات:
-            ${
-              Object.keys(
-                db.commands[
-                  bot.id
-                ] || {}
-              ).length
-            }
-          </p>
-
         </div>
       `;
     }
 
-    res.send(
-      page(
-        "پنل سازنده",
-        `
-        <div class="hero">
+    renderPage(
+      req,
+      res,
+      "پنل سازنده",
+      `
+      <div class="card hero">
 
-          <h1>
-            👑 پنل سازنده
-          </h1>
+        <h1>
+          👑 پنل سازنده
+        </h1>
 
-          <p>
-            مدیریت کلی سیستم
-          </p>
+        <a
+          class="btn btn-danger"
+          href="/creator/logout">
+          🚪 خروج سازنده
+        </a>
 
-          <a
-            class="btn btn-danger"
-            href="/creator/logout">
-            خروج سازنده
-          </a>
+      </div>
 
+      <div class="grid">
+
+        <div class="stat">
+          👤 حساب‌ها
+          <strong>
+            ${db.users.length}
+          </strong>
         </div>
 
-        <div class="grid">
-
-          <div class="stat">
-            👤 کاربران پنل
-            <strong>
-              ${db.users.length}
-            </strong>
-          </div>
-
-          <div class="stat">
-            🤖 ربات‌ها
-            <strong>
-              ${db.bots.length}
-            </strong>
-          </div>
-
-          <div class="stat">
-            👥 کاربران ربات‌ها
-            <strong>
-              ${db.bots.reduce(
-                (sum, bot) =>
-                  sum +
-                  Object.keys(
-                    db.botUsers[
-                      bot.id
-                    ] || {}
-                  ).length,
-                0
-              )}
-            </strong>
-          </div>
-
+        <div class="stat">
+          🤖 ربات‌ها
+          <strong>
+            ${db.bots.length}
+          </strong>
         </div>
 
-        <div class="card">
-
-          <h2>
-            🤖 همه ربات‌ها
-          </h2>
-
-          ${
-            bots ||
-            "<p>رباتی وجود ندارد.</p>"
-          }
-
+        <div class="stat">
+          👥 کاربران ربات‌ها
+          <strong>
+            ${totalBotUsers}
+          </strong>
         </div>
-        `
-      )
+
+        <div class="stat">
+          📌 فعالیت‌ها
+          <strong>
+            ${db.activity.length}
+          </strong>
+        </div>
+
+      </div>
+
+      <div class="card">
+
+        <h2>
+          🤖 تمام ربات‌ها
+        </h2>
+
+        ${
+          bots ||
+          "<p>رباتی وجود ندارد.</p>"
+        }
+
+      </div>
+      `
     );
   }
 );
@@ -4488,32 +4382,30 @@ app.get(
 
 app.use(
   (req, res) => {
-    res
-      .status(404)
-      .send(
-        page(
-          "404",
-          `
-          <div class="card">
+    renderPage(
+      req,
+      res,
+      "404",
+      `
+      <div class="card">
 
-            <h1>
-              404
-            </h1>
+        <h1>
+          404
+        </h1>
 
-            <p>
-              صفحه موردنظر پیدا نشد.
-            </p>
+        <p>
+          صفحه موردنظر پیدا نشد.
+        </p>
 
-            <a
-              class="btn"
-              href="/">
-              صفحه اصلی
-            </a>
+        <a
+          class="btn"
+          href="/dashboard">
+          📊 داشبورد
+        </a>
 
-          </div>
-          `
-        )
-      );
+      </div>
+      `
+    );
   }
 );
 
@@ -4533,27 +4425,19 @@ app.use(
       error
     );
 
-    res
-      .status(500)
-      .send(
-        page(
-          "خطا",
-          `
-          <div class="card">
-
-            <div class="alert error">
-              خطای داخلی سرور.
-              <br><br>
-              ${escapeHtml(
-                error.message ||
-                  ""
-              )}
-            </div>
-
-          </div>
-          `
-        )
-      );
+    res.status(500).send(
+      `
+      <div style="
+        direction:rtl;
+        font-family:Tahoma;
+        padding:40px;
+      ">
+        <h1>
+          خطای داخلی سرور
+        </h1>
+      </div>
+      `
+    );
   }
 );
 
