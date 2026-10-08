@@ -1,0 +1,13 @@
+{
+  "name": "nova-proxy",
+  "version": "4.0.0",
+  "description": "پنل مدیریت چند ربات تلگرام",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "express-session": "^1.18.2"
+  }
+}
