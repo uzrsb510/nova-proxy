@@ -1,0 +1,13 @@
+{
+  "name": "free-bot-config-maker",
+  "version": "1.0.0",
+  "description": "ربات ساز کانفیگ ساز رایگان",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "express-session": "^1.18.2"
+  }
+}
