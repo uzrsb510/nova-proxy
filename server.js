@@ -27,26 +27,64 @@ CREATE TABLE IF NOT EXISTS users (
     used_volume TEXT DEFAULT '0 GB',
     expiry TEXT DEFAULT '',
     subscription_link TEXT DEFAULT '',
+    configs TEXT DEFAULT '',
+    active INTEGER DEFAULT 1,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS telegram_bots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    admin_id INTEGER NOT NULL,
+    token TEXT NOT NULL,
+    username TEXT DEFAULT '',
     active INTEGER DEFAULT 1,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 `);
 
+try {
+    db.exec(`ALTER TABLE users ADD COLUMN configs TEXT DEFAULT ''`);
+} catch (e) {}
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-app.use(
-    session({
-        secret:
-            process.env.SESSION_SECRET ||
-            "nova-proxy-secret-change-this",
-        resave: false,
-        saveUninitialized: false,
-        cookie: {
-            maxAge: 1000 * 60 * 60 * 24
-        }
-    })
-);
+app.use(session({
+    secret: process.env.SESSION_SECRET || "kosar-panel-secret",
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        maxAge: 1000 * 60 * 60 * 24
+    }
+}));
+
+function escapeHtml(str = "") {
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function escapeAttr(str = "") {
+    return escapeHtml(str);
+}
+
+function getBaseUrl(req) {
+    return `${req.protocol}://${req.get("host")}`;
+}
+
+function splitConfigs(text = "") {
+    return String(text)
+        .split("\n")
+        .map(x => x.trim())
+        .filter(Boolean);
+}
+
+function generateToken() {
+    return crypto.randomBytes(18).toString("hex");
+}
 
 function page(title, content) {
     return `
@@ -55,7 +93,7 @@ function page(title, content) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${title}</title>
+<title>${escapeHtml(title)} | پنل مدیریت کوثر</title>
 
 <style>
 * {
@@ -65,78 +103,131 @@ function page(title, content) {
 body {
     margin: 0;
     font-family: Tahoma, Arial, sans-serif;
-    background: #0b1020;
+    background:
+        radial-gradient(circle at top right,#172554,transparent 35%),
+        radial-gradient(circle at bottom left,#312e81,transparent 30%),
+        #070b16;
     color: #fff;
+    min-height: 100vh;
 }
 
 .container {
-    width: min(1100px, 94%);
-    margin: 30px auto;
+    width: min(1100px,94%);
+    margin: 25px auto;
+}
+
+.header {
+    background: rgba(15,23,42,.88);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 24px;
+    padding: 22px;
+    margin-bottom: 18px;
+    box-shadow: 0 20px 50px rgba(0,0,0,.3);
+}
+
+.header h1 {
+    margin: 0 0 8px;
+    font-size: 25px;
+}
+
+.header p {
+    margin: 0;
+    color: #aeb9d0;
 }
 
 .card {
-    background: #151c32;
-    border: 1px solid #27304b;
-    border-radius: 18px;
-    padding: 22px;
-    margin-bottom: 20px;
+    background: rgba(15,23,42,.88);
+    border: 1px solid rgba(255,255,255,.08);
+    border-radius: 22px;
+    padding: 20px;
+    margin-bottom: 18px;
     box-shadow: 0 15px 40px rgba(0,0,0,.25);
-}
-
-h1, h2, h3 {
-    margin-top: 0;
-}
-
-input, button, textarea {
-    width: 100%;
-    padding: 13px;
-    border-radius: 10px;
-    border: 1px solid #303a59;
-    background: #0e1528;
-    color: white;
-    margin-top: 8px;
-    margin-bottom: 12px;
-    font-size: 15px;
-}
-
-button {
-    background: #5865f2;
-    border: none;
-    cursor: pointer;
-    font-weight: bold;
-}
-
-button:hover {
-    opacity: .9;
-}
-
-a {
-    color: #8ea2ff;
-    text-decoration: none;
 }
 
 .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit,minmax(220px,1fr));
-    gap: 15px;
+    grid-template-columns: repeat(auto-fit,minmax(180px,1fr));
+    gap: 14px;
 }
 
 .stat {
-    background: #0e1528;
-    padding: 18px;
-    border-radius: 14px;
-    border: 1px solid #293452;
+    padding: 20px;
+    border-radius: 18px;
+    background: rgba(255,255,255,.05);
+}
+
+.stat b {
+    display: block;
+    font-size: 27px;
+    margin-top: 8px;
+}
+
+input,
+textarea,
+select {
+    width: 100%;
+    padding: 13px;
+    margin: 7px 0 14px;
+    border-radius: 13px;
+    border: 1px solid #334155;
+    background: #0b1220;
+    color: white;
+    outline: none;
+}
+
+textarea {
+    min-height: 150px;
+    resize: vertical;
+    direction: ltr;
+    text-align: left;
+}
+
+button,
+.btn {
+    display: inline-block;
+    border: 0;
+    border-radius: 12px;
+    padding: 11px 16px;
+    color: white;
+    background: #2563eb;
+    cursor: pointer;
+    text-decoration: none;
+    margin: 3px;
+}
+
+button:hover,
+.btn:hover {
+    opacity: .85;
+}
+
+.red {
+    background: #dc2626;
+}
+
+.green {
+    background: #16a34a;
+}
+
+.gray {
+    background: #475569;
+}
+
+.purple {
+    background: #7c3aed;
 }
 
 .user {
-    background: #0e1528;
     padding: 18px;
-    border-radius: 14px;
-    margin-top: 12px;
-    border: 1px solid #293452;
+    border-radius: 18px;
+    background: rgba(255,255,255,.045);
+    margin-bottom: 12px;
 }
 
-.badge {
+.user h3 {
+    margin-top: 0;
+}
+
+.status {
     display: inline-block;
     padding: 5px 10px;
     border-radius: 20px;
@@ -144,63 +235,93 @@ a {
 }
 
 .active {
-    background: #164e35;
-    color: #6ee7a0;
+    background: #14532d;
+    color: #86efac;
 }
 
 .inactive {
-    background: #542020;
-    color: #ff8d8d;
+    background: #7f1d1d;
+    color: #fecaca;
+}
+
+.config {
+    background: #020617;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 10px;
+    margin: 8px 0;
+    word-break: break-all;
+    direction: ltr;
+    text-align: left;
 }
 
 .small {
-    color: #9aa4bd;
+    color: #94a3b8;
     font-size: 13px;
 }
 
-.btn {
-    display: inline-block;
-    width: auto;
-    padding: 10px 15px;
-    margin: 4px;
-    background: #5865f2;
-    color: white;
-    border-radius: 9px;
+.nav {
+    display: flex;
+    gap: 7px;
+    flex-wrap: wrap;
+    margin-bottom: 18px;
 }
 
-.btn.red {
-    background: #b83232;
+.copy {
+    background: #0891b2;
 }
 
-.btn.green {
-    background: #16834b;
-}
-
-.logo {
-    font-size: 30px;
-    font-weight: bold;
-    margin-bottom: 8px;
-}
-
-.center {
-    text-align: center;
+.danger {
+    color: #fecaca;
 }
 
 @media(max-width:600px) {
     .container {
-        width: 92%;
-        margin: 15px auto;
+        width: 96%;
+        margin: 12px auto;
+    }
+
+    .header h1 {
+        font-size: 21px;
     }
 
     .card {
-        padding: 17px;
+        padding: 15px;
+    }
+
+    button,
+    .btn {
+        width: 100%;
+        margin: 4px 0;
     }
 }
 </style>
+
+<script>
+function copyText(text) {
+    navigator.clipboard.writeText(text);
+    alert("کپی شد ✅");
+}
+
+function copyInput(id) {
+    const el = document.getElementById(id);
+    navigator.clipboard.writeText(el.value);
+    alert("کپی شد ✅");
+}
+
+function confirmDelete() {
+    return confirm("آیا از حذف این کاربر مطمئن هستید؟");
+}
+</script>
 </head>
 
 <body>
 <div class="container">
+
+<div class="header">
+    <h1>🛡️ پنل مدیریت کوثر</h1>
+    <p>مدیریت کاربران، کانفیگ‌ها و ربات تلگرام</p>
+</div>
 
 ${content}
 
@@ -210,320 +331,316 @@ ${content}
 `;
 }
 
-function requireLogin(req, res, next) {
-    if (!req.session.adminId) {
-        return res.redirect("/login");
-    }
-
-    next();
-}
+/* =========================
+   صفحه اصلی
+========================= */
 
 app.get("/", (req, res) => {
     if (req.session.adminId) {
         return res.redirect("/admin");
     }
 
-    res.send(
-        page(
-            "نوا پروکسی",
-            `
-<div class="card center">
-    <div class="logo">🚀 نوا پروکسی</div>
-    <p class="small">
-        پنل مدیریت کاربران و اشتراک‌های پروکسی
-    </p>
+    res.send(page("ورود", `
+    <div class="card">
+        <h2>🔐 ورود به پنل</h2>
 
-    <a class="btn" href="/login">
-        🔐 ورود به پنل
-    </a>
+        <form method="POST" action="/login">
+            <input name="username" placeholder="نام کاربری" required>
+            <input name="password" type="password" placeholder="رمز عبور" required>
 
-    <a class="btn green" href="/create-admin">
-        👤 ساخت مدیر
-    </a>
-</div>
-`
-        )
-    );
+            <button type="submit">ورود به پنل</button>
+        </form>
+
+        <a class="btn gray" href="/create-admin">
+            ساخت مدیر جدید
+        </a>
+    </div>
+    `));
 });
 
+/* =========================
+   ساخت مدیر
+========================= */
+
 app.get("/create-admin", (req, res) => {
-    res.send(
-        page(
-            "ساخت مدیر",
-            `
-<div class="card">
-<h2>👤 ساخت حساب مدیر</h2>
+    res.send(page("ساخت مدیر", `
+    <div class="card">
+        <h2>👤 ساخت مدیر</h2>
 
-<form method="POST" action="/create-admin">
+        <form method="POST" action="/create-admin">
+            <input name="username" placeholder="نام کاربری" required>
+            <input name="password" type="password" placeholder="رمز عبور" required>
 
-<label>نام کاربری</label>
-<input name="username" required>
-
-<label>رمز عبور</label>
-<input name="password" type="password" required>
-
-<button type="submit">
-ساخت حساب مدیر
-</button>
-
-</form>
-
-<a href="/login">ورود به حساب</a>
-</div>
-`
-        )
-    );
+            <button type="submit">ساخت حساب</button>
+        </form>
+    </div>
+    `));
 });
 
 app.post("/create-admin", (req, res) => {
-    const username = String(req.body.username || "").trim();
-    const password = String(req.body.password || "");
-
-    if (!username || !password) {
-        return res.send("اطلاعات ناقص است.");
-    }
+    const { username, password } = req.body;
 
     try {
         const hash = bcrypt.hashSync(password, 10);
 
         db.prepare(`
-            INSERT INTO admins (username, password)
-            VALUES (?, ?)
+            INSERT INTO admins(username,password)
+            VALUES(?,?)
         `).run(username, hash);
 
-        res.redirect("/login");
-    } catch (e) {
+        res.redirect("/");
+    } catch {
         res.send("این نام کاربری قبلاً استفاده شده است.");
     }
 });
 
-app.get("/login", (req, res) => {
-    res.send(
-        page(
-            "ورود",
-            `
-<div class="card">
-<h2>🔐 ورود به پنل</h2>
-
-<form method="POST" action="/login">
-
-<label>نام کاربری</label>
-<input name="username" required>
-
-<label>رمز عبور</label>
-<input name="password" type="password" required>
-
-<button type="submit">
-ورود
-</button>
-
-</form>
-</div>
-`
-        )
-    );
-});
+/* =========================
+   ورود
+========================= */
 
 app.post("/login", (req, res) => {
-    const username = String(req.body.username || "").trim();
-    const password = String(req.body.password || "");
+    const { username, password } = req.body;
 
     const admin = db.prepare(`
-        SELECT * FROM admins
-        WHERE username = ?
+        SELECT * FROM admins WHERE username = ?
     `).get(username);
 
-    if (!admin) {
-        return res.send("نام کاربری یا رمز عبور اشتباه است.");
-    }
-
-    if (!bcrypt.compareSync(password, admin.password)) {
+    if (!admin || !bcrypt.compareSync(password, admin.password)) {
         return res.send("نام کاربری یا رمز عبور اشتباه است.");
     }
 
     req.session.adminId = admin.id;
-    req.session.username = admin.username;
 
     res.redirect("/admin");
 });
 
-app.get("/admin", requireLogin, (req, res) => {
+/* =========================
+   محافظ پنل
+========================= */
+
+function auth(req, res, next) {
+    if (!req.session.adminId) {
+        return res.redirect("/");
+    }
+
+    next();
+}
+
+/* =========================
+   داشبورد
+========================= */
+
+app.get("/admin", auth, (req, res) => {
+
+    const adminId = req.session.adminId;
+
+    const total = db.prepare(`
+        SELECT COUNT(*) AS c
+        FROM users
+        WHERE admin_id = ?
+    `).get(adminId).c;
+
+    const active = db.prepare(`
+        SELECT COUNT(*) AS c
+        FROM users
+        WHERE admin_id = ? AND active = 1
+    `).get(adminId).c;
+
+    const inactive = total - active;
+
+    const bot = db.prepare(`
+        SELECT *
+        FROM telegram_bots
+        WHERE admin_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+    `).get(adminId);
+
     const users = db.prepare(`
         SELECT *
         FROM users
         WHERE admin_id = ?
         ORDER BY id DESC
-    `).all(req.session.adminId);
+    `).all(adminId);
 
     let usersHtml = "";
 
-    if (users.length === 0) {
-        usersHtml = `
-<div class="user">
-    هنوز کاربری اضافه نشده است.
-</div>
-`;
-    } else {
-        usersHtml = users
-            .map(
-                (u) => `
-<div class="user">
+    for (const user of users) {
 
-<h3>👤 ${escapeHtml(u.name)}</h3>
+        const configs = splitConfigs(user.configs);
 
-<p>
-وضعیت:
-${
-    u.active
-        ? '<span class="badge active">فعال</span>'
-        : '<span class="badge inactive">غیرفعال</span>'
-}
-</p>
+        usersHtml += `
+        <div class="user">
 
-<p>📦 حجم کل: ${escapeHtml(u.total_volume)}</p>
-<p>📊 مصرف شده: ${escapeHtml(u.used_volume)}</p>
-<p>⏳ انقضا: ${escapeHtml(u.expiry || "تعیین نشده")}</p>
+            <h3>👤 ${escapeHtml(user.name)}</h3>
 
-<a class="btn" href="/admin/user/${u.id}">
-مدیریت
-</a>
+            <span class="status ${user.active ? "active" : "inactive"}">
+                ${user.active ? "🟢 فعال" : "🔴 غیرفعال"}
+            </span>
 
-<a class="btn green" href="/u/${u.token}" target="_blank">
-صفحه کاربر
-</a>
+            <p>📦 حجم: ${escapeHtml(user.total_volume)}</p>
+            <p>📅 انقضا: ${escapeHtml(user.expiry || "نامحدود")}</p>
+            <p>📡 تعداد کانفیگ: ${configs.length}</p>
 
-<a class="btn" href="/admin/user/${u.id}/qr">
-QR
-</a>
+            <input
+                id="sub_${user.id}"
+                value="${escapeAttr(user.subscription_link)}"
+                readonly
+            >
 
-</div>
-`
-            )
-            .join("");
+            <button class="copy"
+                onclick="copyInput('sub_${user.id}')">
+                🔗 کپی لینک اشتراک
+            </button>
+
+            <a class="btn" href="/admin/user/${user.id}">
+                ⚙️ مدیریت کاربر
+            </a>
+
+        </div>
+        `;
     }
 
-    res.send(
-        page(
-            "پنل مدیریت نوا پروکسی",
-            `
-<div class="card">
+    if (!usersHtml) {
+        usersHtml = `
+        <div class="card">
+            هنوز کاربری ساخته نشده است.
+        </div>
+        `;
+    }
 
-<div class="logo">
-🚀 نوا پروکسی
-</div>
+    res.send(page("داشبورد", `
 
-<p class="small">
-مدیر: ${escapeHtml(req.session.username)}
-</p>
+    <div class="nav">
+        <a class="btn" href="/admin">🏠 داشبورد</a>
+        <a class="btn green" href="/admin/add">➕ افزودن کاربر</a>
+        <a class="btn purple" href="/admin/telegram">🤖 ربات تلگرام</a>
+        <a class="btn red" href="/logout">خروج</a>
+    </div>
 
-<div class="grid">
+    <div class="grid">
 
-<div class="stat">
-<h3>👥 کاربران</h3>
-<strong>${users.length}</strong>
-</div>
+        <div class="stat">
+            👥 کاربران
+            <b>${total}</b>
+        </div>
 
-<div class="stat">
-<h3>🟢 فعال</h3>
-<strong>${users.filter((x) => x.active).length}</strong>
-</div>
+        <div class="stat">
+            🟢 فعال
+            <b>${active}</b>
+        </div>
 
-<div class="stat">
-<h3>🔴 غیرفعال</h3>
-<strong>${users.filter((x) => !x.active).length}</strong>
-</div>
+        <div class="stat">
+            🔴 غیرفعال
+            <b>${inactive}</b>
+        </div>
 
-</div>
+    </div>
 
-</div>
+    <div class="card">
+        <h2>👥 کاربران</h2>
 
-<div class="card">
+        <input
+            id="search"
+            placeholder="🔎 جستجوی کاربر..."
+            oninput="searchUsers()"
+        >
 
-<h2>➕ افزودن کاربر</h2>
+        <div id="users">
+            ${usersHtml}
+        </div>
+    </div>
 
-<form method="POST" action="/admin/add">
+    <script>
+    function searchUsers() {
+        const value =
+            document.getElementById("search").value.toLowerCase();
 
-<label>نام کاربر</label>
-<input
-    name="name"
-    placeholder="مثلاً علی"
-    required
->
+        document.querySelectorAll(".user").forEach(el => {
+            el.style.display =
+                el.innerText.toLowerCase().includes(value)
+                ? "block"
+                : "none";
+        });
+    }
+    </script>
 
-<label>حجم کل</label>
-<input
-    name="total_volume"
-    placeholder="مثلاً 100 GB"
->
-
-<label>حجم مصرف شده</label>
-<input
-    name="used_volume"
-    placeholder="مثلاً 20 GB"
->
-
-<label>تاریخ انقضا</label>
-<input
-    name="expiry"
-    placeholder="مثلاً 1405/12/30"
->
-
-<label>لینک اشتراک کاربر</label>
-<input
-    name="subscription_link"
-    placeholder="لینک اشتراک را وارد کنید"
->
-
-<button type="submit">
-ساخت کاربر
-</button>
-
-</form>
-
-</div>
-
-<div class="card">
-
-<h2>👥 کاربران</h2>
-
-${usersHtml}
-
-</div>
-
-<div class="card center">
-
-<a class="btn red" href="/logout">
-خروج از حساب
-</a>
-
-</div>
-`
-        )
-    );
+    `));
 });
 
-app.post("/admin/add", requireLogin, (req, res) => {
-    const name = String(req.body.name || "").trim();
+/* =========================
+   افزودن کاربر
+========================= */
 
-    const totalVolume =
-        String(req.body.total_volume || "").trim() ||
-        "نامحدود";
+app.get("/admin/add", auth, (req, res) => {
 
-    const usedVolume =
-        String(req.body.used_volume || "").trim() ||
-        "0 GB";
+    res.send(page("افزودن کاربر", `
 
-    const expiry =
-        String(req.body.expiry || "").trim();
+    <div class="nav">
+        <a class="btn gray" href="/admin">⬅️ برگشت</a>
+    </div>
 
-    const subscriptionLink =
-        String(req.body.subscription_link || "").trim();
+    <div class="card">
 
-    if (!name) {
-        return res.send("نام کاربر الزامی است.");
-    }
+        <h2>➕ ساخت کاربر جدید</h2>
 
-    const token = crypto.randomBytes(24).toString("hex");
+        <form method="POST" action="/admin/add">
+
+            <label>👤 نام کاربر</label>
+            <input
+                name="name"
+                placeholder="مثلاً علی"
+                required
+            >
+
+            <label>📦 حجم</label>
+            <input
+                name="total_volume"
+                value="نامحدود"
+                placeholder="مثلاً 100 GB"
+            >
+
+            <label>📅 تاریخ انقضا</label>
+            <input
+                name="expiry"
+                placeholder="مثلاً 2026-12-31"
+            >
+
+            <label>📡 کانفیگ‌ها</label>
+
+            <textarea
+                name="configs"
+                placeholder="هر کانفیگ را در یک خط قرار دهید
+
+vless://...
+trojan://...
+vless://..."
+            ></textarea>
+
+            <button class="green" type="submit">
+                ✅ ساخت کاربر
+            </button>
+
+        </form>
+
+    </div>
+
+    `));
+});
+
+app.post("/admin/add", auth, (req, res) => {
+
+    const {
+        name,
+        total_volume,
+        expiry,
+        configs
+    } = req.body;
+
+    const token = generateToken();
+
+    const subscription =
+        `${getBaseUrl(req)}/sub/${token}`;
 
     db.prepare(`
         INSERT INTO users
@@ -532,25 +649,30 @@ app.post("/admin/add", requireLogin, (req, res) => {
             name,
             token,
             total_volume,
-            used_volume,
             expiry,
-            subscription_link
+            subscription_link,
+            configs
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES(?,?,?,?,?,?,?)
     `).run(
         req.session.adminId,
         name,
         token,
-        totalVolume,
-        usedVolume,
-        expiry,
-        subscriptionLink
+        total_volume || "نامحدود",
+        expiry || "",
+        subscription,
+        configs || ""
     );
 
     res.redirect("/admin");
 });
 
-app.get("/admin/user/:id", requireLogin, (req, res) => {
+/* =========================
+   مدیریت کاربر
+========================= */
+
+app.get("/admin/user/:id", auth, (req, res) => {
+
     const user = db.prepare(`
         SELECT *
         FROM users
@@ -562,138 +684,165 @@ app.get("/admin/user/:id", requireLogin, (req, res) => {
     );
 
     if (!user) {
-        return res.status(404).send("کاربر پیدا نشد.");
+        return res.send("کاربر پیدا نشد.");
     }
 
-    res.send(
-        page(
-            "مدیریت کاربر",
-            `
-<div class="card">
+    const configs = splitConfigs(user.configs);
 
-<h2>👤 مدیریت ${escapeHtml(user.name)}</h2>
+    let configHtml = "";
 
-<form method="POST" action="/admin/user/${user.id}/update">
+    configs.forEach((config, index) => {
+        configHtml += `
+        <div class="config">
+            <b>کانفیگ ${index + 1}</b>
 
-<label>نام کاربر</label>
-<input
-    name="name"
-    value="${escapeAttr(user.name)}"
-    required
->
+            <br><br>
 
-<label>حجم کل</label>
-<input
-    name="total_volume"
-    value="${escapeAttr(user.total_volume)}"
->
+            ${escapeHtml(config)}
 
-<label>حجم مصرف شده</label>
-<input
-    name="used_volume"
-    value="${escapeAttr(user.used_volume)}"
->
+            <br>
 
-<label>تاریخ انقضا</label>
-<input
-    name="expiry"
-    value="${escapeAttr(user.expiry)}"
->
+            <button
+                class="copy"
+                onclick='copyText(${JSON.stringify(config)})'>
+                📋 کپی
+            </button>
+        </div>
+        `;
+    });
 
-<label>لینک اشتراک کاربر</label>
-<input
-    name="subscription_link"
-    value="${escapeAttr(user.subscription_link)}"
->
+    if (!configHtml) {
+        configHtml = `<p class="small">کانفیگی ثبت نشده است.</p>`;
+    }
 
-<button type="submit">
-💾 ذخیره تغییرات
-</button>
+    res.send(page("مدیریت کاربر", `
 
-</form>
+    <div class="nav">
+        <a class="btn gray" href="/admin">⬅️ برگشت</a>
+    </div>
 
-<form method="POST" action="/admin/user/${user.id}/toggle">
+    <div class="card">
 
-<button type="submit">
-${user.active ? "🔴 غیرفعال کردن" : "🟢 فعال کردن"}
-</button>
+        <h2>👤 ${escapeHtml(user.name)}</h2>
 
-</form>
+        <span class="status ${user.active ? "active" : "inactive"}">
+            ${user.active ? "🟢 فعال" : "🔴 غیرفعال"}
+        </span>
 
-<a
-    class="btn green"
-    href="/u/${user.token}"
-    target="_blank"
->
-🌐 صفحه عمومی کاربر
-</a>
+        <form method="POST"
+              action="/admin/user/${user.id}/update">
 
-<a
-    class="btn"
-    href="/admin/user/${user.id}/qr"
->
-📱 دریافت QR
-</a>
+            <label>نام</label>
+            <input
+                name="name"
+                value="${escapeAttr(user.name)}"
+                required
+            >
 
-<br><br>
+            <label>حجم</label>
+            <input
+                name="total_volume"
+                value="${escapeAttr(user.total_volume)}"
+            >
 
-<a href="/admin">
-⬅️ بازگشت به پنل
-</a>
+            <label>تاریخ انقضا</label>
+            <input
+                name="expiry"
+                value="${escapeAttr(user.expiry)}"
+            >
 
-</div>
-`
-        )
-    );
+            <label>کانفیگ‌ها</label>
+
+            <textarea name="configs">${escapeHtml(user.configs)}</textarea>
+
+            <button class="green">
+                💾 ذخیره تغییرات
+            </button>
+
+        </form>
+
+        <hr>
+
+        <h3>🔗 لینک اشتراک</h3>
+
+        <input
+            id="sub"
+            value="${escapeAttr(user.subscription_link)}"
+            readonly
+        >
+
+        <button
+            class="copy"
+            onclick="copyInput('sub')">
+            📋 کپی لینک
+        </button>
+
+        <a
+            class="btn purple"
+            href="/admin/user/${user.id}/qr"
+            target="_blank">
+            📱 QR Code
+        </a>
+
+    </div>
+
+    <div class="card">
+
+        <h2>📡 کانفیگ‌های کاربر</h2>
+
+        ${configHtml}
+
+    </div>
+
+    <div class="card">
+
+        <form method="POST"
+              action="/admin/user/${user.id}/toggle">
+
+            <button class="${user.active ? "red" : "green"}">
+                ${user.active ? "🔴 غیرفعال کردن" : "🟢 فعال کردن"}
+            </button>
+
+        </form>
+
+        <form method="POST"
+              action="/admin/user/${user.id}/delete"
+              onsubmit="return confirmDelete()">
+
+            <button class="red">
+                🗑 حذف کاربر
+            </button>
+
+        </form>
+
+    </div>
+
+    `));
 });
 
-app.post("/admin/user/:id/update", requireLogin, (req, res) => {
-    const user = db.prepare(`
-        SELECT *
-        FROM users
-        WHERE id = ?
-        AND admin_id = ?
-    `).get(
-        req.params.id,
-        req.session.adminId
-    );
+app.post("/admin/user/:id/update", auth, (req, res) => {
 
-    if (!user) {
-        return res.status(404).send("کاربر پیدا نشد.");
-    }
-
-    const name = String(req.body.name || "").trim();
-
-    const totalVolume =
-        String(req.body.total_volume || "").trim() ||
-        "نامحدود";
-
-    const usedVolume =
-        String(req.body.used_volume || "").trim() ||
-        "0 GB";
-
-    const expiry =
-        String(req.body.expiry || "").trim();
-
-    const subscriptionLink =
-        String(req.body.subscription_link || "").trim();
+    const {
+        name,
+        total_volume,
+        expiry,
+        configs
+    } = req.body;
 
     db.prepare(`
         UPDATE users
         SET
             name = ?,
             total_volume = ?,
-            used_volume = ?,
             expiry = ?,
-            subscription_link = ?
+            configs = ?
         WHERE id = ?
         AND admin_id = ?
     `).run(
         name,
-        totalVolume,
-        usedVolume,
+        total_volume,
         expiry,
-        subscriptionLink,
+        configs || "",
         req.params.id,
         req.session.adminId
     );
@@ -701,28 +850,17 @@ app.post("/admin/user/:id/update", requireLogin, (req, res) => {
     res.redirect(`/admin/user/${req.params.id}`);
 });
 
-app.post("/admin/user/:id/toggle", requireLogin, (req, res) => {
-    const user = db.prepare(`
-        SELECT *
-        FROM users
-        WHERE id = ?
-        AND admin_id = ?
-    `).get(
-        req.params.id,
-        req.session.adminId
-    );
-
-    if (!user) {
-        return res.status(404).send("کاربر پیدا نشد.");
-    }
+app.post("/admin/user/:id/toggle", auth, (req, res) => {
 
     db.prepare(`
         UPDATE users
-        SET active = ?
+        SET active = CASE
+            WHEN active = 1 THEN 0
+            ELSE 1
+        END
         WHERE id = ?
         AND admin_id = ?
     `).run(
-        user.active ? 0 : 1,
         req.params.id,
         req.session.adminId
     );
@@ -730,7 +868,26 @@ app.post("/admin/user/:id/toggle", requireLogin, (req, res) => {
     res.redirect(`/admin/user/${req.params.id}`);
 });
 
-app.get("/admin/user/:id/qr", requireLogin, async (req, res) => {
+app.post("/admin/user/:id/delete", auth, (req, res) => {
+
+    db.prepare(`
+        DELETE FROM users
+        WHERE id = ?
+        AND admin_id = ?
+    `).run(
+        req.params.id,
+        req.session.adminId
+    );
+
+    res.redirect("/admin");
+});
+
+/* =========================
+   QR
+========================= */
+
+app.get("/admin/user/:id/qr", auth, async (req, res) => {
+
     const user = db.prepare(`
         SELECT *
         FROM users
@@ -742,168 +899,600 @@ app.get("/admin/user/:id/qr", requireLogin, async (req, res) => {
     );
 
     if (!user) {
-        return res.status(404).send("کاربر پیدا نشد.");
+        return res.send("کاربر پیدا نشد.");
     }
 
-    const publicUrl =
-        `${getBaseUrl(req)}/u/${user.token}`;
+    const qr = await QRCode.toDataURL(
+        user.subscription_link
+    );
 
-    try {
-        const qr = await QRCode.toDataURL(publicUrl);
+    res.send(page("QR Code", `
 
-        res.send(
-            page(
-                "QR کاربر",
-                `
-<div class="card center">
+    <div class="card" style="text-align:center">
 
-<h2>📱 QR کد ${escapeHtml(user.name)}</h2>
+        <h2>📱 QR Code</h2>
 
-<img
-    src="${qr}"
-    style="max-width:350px;width:100%;background:white;padding:15px;border-radius:15px;"
->
+        <img
+            src="${qr}"
+            style="max-width:100%;background:white;padding:15px;border-radius:20px"
+        >
 
-<p class="small">
-${escapeHtml(publicUrl)}
-</p>
+        <p>${escapeHtml(user.name)}</p>
 
-<a class="btn" href="/admin">
-⬅️ بازگشت
-</a>
+        <a class="btn" href="/admin/user/${user.id}">
+            ⬅️ برگشت
+        </a>
 
-</div>
-`
-            )
-        );
-    } catch (e) {
-        res.status(500).send("خطا در ساخت QR");
-    }
+    </div>
+
+    `));
 });
 
+/* =========================
+   صفحه عمومی کاربر
+========================= */
+
 app.get("/u/:token", (req, res) => {
+
     const user = db.prepare(`
         SELECT *
         FROM users
         WHERE token = ?
     `).get(req.params.token);
 
-    if (!user) {
-        return res.status(404).send(
-            page(
-                "کاربر پیدا نشد",
-                `
-<div class="card center">
-<h2>❌ کاربر پیدا نشد</h2>
-</div>
-`
-            )
-        );
+    if (!user || !user.active) {
+        return res.send("این پنل فعال نیست.");
     }
 
-    const status = user.active
-        ? '<span class="badge active">فعال</span>'
-        : '<span class="badge inactive">غیرفعال</span>';
+    const configs = splitConfigs(user.configs);
 
-    let subscriptionButton = "";
+    let configHtml = "";
 
-    if (user.subscription_link) {
-        subscriptionButton = `
-<a
-    class="btn green"
-    href="${escapeAttr(user.subscription_link)}"
-    target="_blank"
->
-🔗 دریافت لینک اشتراک
-</a>
-`;
-    }
+    configs.forEach((config, index) => {
 
-    res.send(
-        page(
-            `پنل ${user.name}`,
-            `
-<div class="card center">
+        configHtml += `
+        <div class="config">
 
-<div class="logo">
-🚀 نوا پروکسی
-</div>
+            <b>📡 کانفیگ ${index + 1}</b>
 
-<h2>
-${escapeHtml(user.name)}
-</h2>
+            <br><br>
 
-<p>
-وضعیت: ${status}
-</p>
+            ${escapeHtml(config)}
 
-<div class="grid">
+            <br>
 
-<div class="stat">
-<h3>📦 حجم کل</h3>
-<strong>
-${escapeHtml(user.total_volume)}
-</strong>
-</div>
+            <button
+                class="copy"
+                onclick='copyText(${JSON.stringify(config)})'>
+                📋 کپی کانفیگ
+            </button>
 
-<div class="stat">
-<h3>📊 مصرف شده</h3>
-<strong>
-${escapeHtml(user.used_volume)}
-</strong>
-</div>
+        </div>
+        `;
+    });
 
-<div class="stat">
-<h3>⏳ تاریخ انقضا</h3>
-<strong>
-${escapeHtml(user.expiry || "تعیین نشده")}
-</strong>
-</div>
+    res.send(page("پنل کاربر", `
 
-</div>
+    <div class="card">
 
-<br>
+        <h2>🚀 پنل شخصی</h2>
 
-${subscriptionButton}
+        <h3>👤 ${escapeHtml(user.name)}</h3>
 
-</div>
-`
-        )
-    );
+        <p>📦 حجم: ${escapeHtml(user.total_volume)}</p>
+
+        <p>📅 انقضا:
+            ${escapeHtml(user.expiry || "نامحدود")}
+        </p>
+
+        <h3>🔗 لینک اشتراک</h3>
+
+        <input
+            id="sub"
+            value="${escapeAttr(user.subscription_link)}"
+            readonly
+        >
+
+        <button
+            class="copy"
+            onclick="copyInput('sub')">
+            📋 کپی لینک اشتراک
+        </button>
+
+    </div>
+
+    <div class="card">
+
+        <h2>📡 کانفیگ‌ها</h2>
+
+        ${configHtml || "<p>کانفیگی موجود نیست.</p>"}
+
+    </div>
+
+    `));
 });
 
+/* =========================
+   Subscription
+========================= */
+
+app.get("/sub/:token", (req, res) => {
+
+    const user = db.prepare(`
+        SELECT *
+        FROM users
+        WHERE token = ?
+        AND active = 1
+    `).get(req.params.token);
+
+    if (!user) {
+        return res.status(404).send("Subscription not found");
+    }
+
+    const configs = splitConfigs(user.configs);
+
+    res.setHeader(
+        "Content-Type",
+        "text/plain; charset=utf-8"
+    );
+
+    res.send(configs.join("\n"));
+});
+
+/* =====================================================
+   اتصال ربات تلگرام
+===================================================== */
+
+app.get("/admin/telegram", auth, async (req, res) => {
+
+    const bot = db.prepare(`
+        SELECT *
+        FROM telegram_bots
+        WHERE admin_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+    `).get(req.session.adminId);
+
+    res.send(page("ربات تلگرام", `
+
+    <div class="nav">
+        <a class="btn gray" href="/admin">⬅️ برگشت</a>
+    </div>
+
+    <div class="card">
+
+        <h2>🤖 اتصال ربات تلگرام</h2>
+
+        <p class="small">
+            توکن BotFather را وارد کنید.
+        </p>
+
+        <form method="POST" action="/admin/telegram/connect">
+
+            <input
+                name="token"
+                type="password"
+                placeholder="توکن ربات تلگرام"
+                required
+            >
+
+            <button class="green">
+                🔗 اتصال ربات
+            </button>
+
+        </form>
+
+        ${
+            bot
+            ? `
+            <hr>
+
+            <p>
+                وضعیت:
+                <span class="status active">
+                    🟢 متصل
+                </span>
+            </p>
+
+            <p>
+                ربات:
+                @${escapeHtml(bot.username)}
+            </p>
+
+            <form method="POST"
+                  action="/admin/telegram/disconnect">
+
+                <button class="red">
+                    🔌 قطع اتصال
+                </button>
+
+            </form>
+            `
+            : `
+            <p class="small">
+                هنوز رباتی متصل نشده است.
+            </p>
+            `
+        }
+
+    </div>
+
+    <div class="card">
+
+        <h3>📋 امکانات ربات</h3>
+
+        <p>👤 افزودن کاربر</p>
+        <p>📋 لیست کاربران</p>
+        <p>🔎 جستجوی کاربر</p>
+        <p>✏️ ویرایش کاربر</p>
+        <p>🗑 حذف کاربر</p>
+        <p>📡 مدیریت کانفیگ‌ها</p>
+        <p>🔗 لینک اشتراک</p>
+        <p>📊 آمار کاربران</p>
+
+    </div>
+
+    `));
+});
+
+app.post("/admin/telegram/connect", auth, async (req, res) => {
+
+    const token = String(req.body.token || "").trim();
+
+    if (!token) {
+        return res.send("توکن وارد نشده است.");
+    }
+
+    try {
+
+        const response = await fetch(
+            `https://api.telegram.org/bot${token}/getMe`
+        );
+
+        const data = await response.json();
+
+        if (!data.ok) {
+            return res.send("❌ توکن ربات اشتباه است.");
+        }
+
+        db.prepare(`
+            DELETE FROM telegram_bots
+            WHERE admin_id = ?
+        `).run(req.session.adminId);
+
+        db.prepare(`
+            INSERT INTO telegram_bots
+            (
+                admin_id,
+                token,
+                username,
+                active
+            )
+            VALUES(?,?,?,1)
+        `).run(
+            req.session.adminId,
+            token,
+            data.result.username || ""
+        );
+
+        res.redirect("/admin/telegram");
+
+    } catch (error) {
+
+        res.send(
+            "خطا در اتصال به تلگرام: " +
+            escapeHtml(error.message)
+        );
+    }
+});
+
+app.post("/admin/telegram/disconnect", auth, (req, res) => {
+
+    db.prepare(`
+        DELETE FROM telegram_bots
+        WHERE admin_id = ?
+    `).run(req.session.adminId);
+
+    res.redirect("/admin/telegram");
+});
+
+/* =====================================================
+   Telegram API
+===================================================== */
+
+async function telegramRequest(token, method, body) {
+
+    const response = await fetch(
+        `https://api.telegram.org/bot${token}/${method}`,
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(body)
+        }
+    );
+
+    return response.json();
+}
+
+async function sendTelegram(token, chatId, text, keyboard = null) {
+
+    const body = {
+        chat_id: chatId,
+        text
+    };
+
+    if (keyboard) {
+        body.reply_markup = {
+            inline_keyboard: keyboard
+        };
+    }
+
+    return telegramRequest(
+        token,
+        "sendMessage",
+        body
+    );
+}
+
+/* =====================================================
+   Telegram Webhook
+===================================================== */
+
+app.post("/telegram/webhook/:token", async (req, res) => {
+
+    res.send("OK");
+
+    const token = req.params.token;
+    const update = req.body;
+
+    try {
+
+        if (!update.message) {
+            return;
+        }
+
+        const message = update.message;
+        const chatId = message.chat.id;
+        const text = message.text || "";
+
+        const bot = db.prepare(`
+            SELECT *
+            FROM telegram_bots
+            WHERE token = ?
+            AND active = 1
+        `).get(token);
+
+        if (!bot) {
+            return;
+        }
+
+        /* ======================
+           START
+        ====================== */
+
+        if (text === "/start") {
+
+            await sendTelegram(
+                token,
+                chatId,
+                "🤖 پنل مدیریت کوثر\n\nیکی از گزینه‌های زیر را انتخاب کنید:",
+                [
+                    [
+                        {
+                            text: "➕ افزودن کاربر",
+                            callback_data: "add_user"
+                        }
+                    ],
+                    [
+                        {
+                            text: "👥 لیست کاربران",
+                            callback_data: "users"
+                        },
+                        {
+                            text: "📊 آمار",
+                            callback_data: "stats"
+                        }
+                    ]
+                ]
+            );
+
+            return;
+        }
+
+        /* ======================
+           ADD USER
+        ====================== */
+
+        if (text === "/add") {
+
+            await sendTelegram(
+                token,
+                chatId,
+                "👤 نام کاربر را ارسال کنید:\n\nمثال:\nعلی"
+            );
+
+            return;
+        }
+
+        /*
+         اگر متن /add نبود ولی کاربر در حالت
+         افزودن است، در نسخه بعدی state
+         مرحله‌به‌مرحله مدیریت می‌شود.
+        */
+
+        if (text === "/users") {
+
+            const users = db.prepare(`
+                SELECT *
+                FROM users
+                WHERE admin_id = ?
+                ORDER BY id DESC
+                LIMIT 30
+            `).all(bot.admin_id);
+
+            if (!users.length) {
+
+                await sendTelegram(
+                    token,
+                    chatId,
+                    "📭 هنوز کاربری وجود ندارد."
+                );
+
+                return;
+            }
+
+            let output = "👥 لیست کاربران:\n\n";
+
+            users.forEach((u, i) => {
+
+                output +=
+                    `${i + 1}. ${u.name} ` +
+                    `${u.active ? "🟢" : "🔴"}\n`;
+
+            });
+
+            await sendTelegram(
+                token,
+                chatId,
+                output
+            );
+
+            return;
+        }
+
+        if (text === "/stats") {
+
+            const total = db.prepare(`
+                SELECT COUNT(*) AS c
+                FROM users
+                WHERE admin_id = ?
+            `).get(bot.admin_id).c;
+
+            const active = db.prepare(`
+                SELECT COUNT(*) AS c
+                FROM users
+                WHERE admin_id = ?
+                AND active = 1
+            `).get(bot.admin_id).c;
+
+            await sendTelegram(
+                token,
+                chatId,
+                `📊 آمار پنل\n\n` +
+                `👥 کل کاربران: ${total}\n` +
+                `🟢 فعال: ${active}\n` +
+                `🔴 غیرفعال: ${total - active}`
+            );
+
+            return;
+        }
+
+    } catch (error) {
+
+        console.error(
+            "Telegram error:",
+            error.message
+        );
+    }
+});
+
+/* =====================================================
+   Webhook Connect
+===================================================== */
+
+async function setupWebhook(token, req) {
+
+    const webhookUrl =
+        `${getBaseUrl(req)}/telegram/webhook/${token}`;
+
+    return telegramRequest(
+        token,
+        "setWebhook",
+        {
+            url: webhookUrl
+        }
+    );
+}
+
+/* =====================================================
+   بعد از اتصال ربات Webhook
+===================================================== */
+
+app.post("/admin/telegram/connect", auth, async (req, res) => {
+
+    const token = String(req.body.token || "").trim();
+
+    if (!token) {
+        return res.send("توکن وارد نشده است.");
+    }
+
+    try {
+
+        const response = await fetch(
+            `https://api.telegram.org/bot${token}/getMe`
+        );
+
+        const data = await response.json();
+
+        if (!data.ok) {
+            return res.send("❌ توکن ربات اشتباه است.");
+        }
+
+        db.prepare(`
+            DELETE FROM telegram_bots
+            WHERE admin_id = ?
+        `).run(req.session.adminId);
+
+        db.prepare(`
+            INSERT INTO telegram_bots
+            (
+                admin_id,
+                token,
+                username,
+                active
+            )
+            VALUES(?,?,?,1)
+        `).run(
+            req.session.adminId,
+            token,
+            data.result.username || ""
+        );
+
+        await setupWebhook(token, req);
+
+        res.redirect("/admin/telegram");
+
+    } catch (error) {
+
+        res.send(
+            "❌ خطا: " +
+            escapeHtml(error.message)
+        );
+    }
+});
+
+/* =========================
+   خروج
+========================= */
+
 app.get("/logout", (req, res) => {
+
     req.session.destroy(() => {
         res.redirect("/");
     });
+
 });
 
-function getBaseUrl(req) {
-    const forwardedProto =
-        req.headers["x-forwarded-proto"];
-
-    const protocol =
-        forwardedProto ||
-        req.protocol;
-
-    return `${protocol}://${req.get("host")}`;
-}
-
-function escapeHtml(value) {
-    return String(value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-}
-
-function escapeAttr(value) {
-    return escapeHtml(value);
-}
+/* =========================
+   اجرا
+========================= */
 
 app.listen(PORT, "0.0.0.0", () => {
+
     console.log(
-        `Nova Proxy panel running on port ${PORT}`
+        `Kosar Panel running on port ${PORT}`
     );
+
 });
